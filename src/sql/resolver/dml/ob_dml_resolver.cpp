@@ -12936,6 +12936,61 @@ bool file_sql_name_match(const ParseNode &node, const char *name)
 }
 } // namespace
 
+/**
+ * A file table without any row (an empty local file or glob() without match)
+ * cannot carry access exprs: the values table access op derives the row count
+ * from them. Generate the column items directly instead, so that the op keeps
+ * a row count of zero.
+ */
+int gen_empty_file_table_column_items(ObRawExprFactory &expr_factory,
+                                      ObIAllocator &allocator,
+                                      ObDMLStmt &stmt,
+                                      const int64_t column_cnt,
+                                      const ObIArray<ObRawExprResType> &res_types,
+                                      const ObIArray<ObString> &column_names,
+                                      const uint64_t table_id,
+                                      const ObString &table_name)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(column_cnt <= 0) || OB_UNLIKELY(res_types.count() != column_cnt)
+      || OB_UNLIKELY(column_names.count() != column_cnt)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid empty file table", K(column_cnt), K(res_types.count()),
+             K(column_names.count()), K(ret));
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < column_cnt; ++i) {
+      ObColumnRefRawExpr *column_expr = NULL;
+      char *buf = NULL;
+      const ObString &name = column_names.at(i);
+      if (OB_FAIL(expr_factory.create_raw_expr(T_REF_COLUMN, column_expr))) {
+        LOG_WARN("failed to create column expr", K(ret));
+      } else if (OB_ISNULL(column_expr)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_ISNULL(buf = static_cast<char *>(allocator.alloc(name.length())))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        MEMCPY(buf, name.ptr(), name.length());
+        ObString column_name(name.length(), buf);
+        column_expr->set_result_type(res_types.at(i));
+        column_expr->set_ref_id(table_id, i + OB_APP_MIN_COLUMN_ID);
+        column_expr->set_column_attr(table_name, column_name);
+        if (OB_FAIL(column_expr->add_flag(IS_COLUMN))) {
+        } else {
+          ColumnItem column_item;
+          column_item.expr_ = column_expr;
+          column_item.table_id_ = column_expr->get_table_id();
+          column_item.column_id_ = column_expr->get_column_id();
+          column_item.column_name_ = column_expr->get_column_name();
+          if (OB_FAIL(stmt.add_column_item(column_item))) {
+            LOG_WARN("failed to add column item", K(ret));
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 int ObDMLResolver::resolve_file_table_item(const ParseNode &table_node, TableItem *&table_item)
 {
   int ret = OB_SUCCESS;
@@ -13052,7 +13107,7 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &table_node, TableIte
         for (int64_t j = 0; OB_SUCC(ret) && j < data.cols_.count(); ++j) {
           const ObFileSqlColumnMeta &meta = data.cols_.at(j);
           ObRawExprResType res_type;
-          if (OB_UNLIKELY(j >= data.cells_.count())) {
+          if (OB_UNLIKELY(data.row_cnt_ > 0 && j >= data.cells_.count())) {
             ret = OB_ERR_UNEXPECTED;
           } else {
             res_type.set_type(meta.type_);
@@ -13092,12 +13147,19 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &table_node, TableIte
           } else if (OB_FAIL(table_def->access_exprs_.push_back(const_expr))) {
           }
         }
-        if (OB_FAIL(ret)) {
-        } else if (OB_FAIL(compute_values_table_row_count(*table_def))) {
-          LOG_WARN("failed to compute values table row count", K(ret));
-        } else if (OB_FAIL(estimate_values_table_stats(*table_def))) {
+        // an empty file table (for example glob() without any match) has no
+        // access expr at all, its row count is zero by definition
+        if (OB_SUCC(ret) && data.row_cnt_ > 0) {
+          if (OB_FAIL(compute_values_table_row_count(*table_def))) {
+            LOG_WARN("failed to compute values table row count", K(ret));
+          }
+        }
+        // the statistics are needed even for an empty file table, the optimizer
+        // walks the ndv array column by column
+        if (OB_SUCC(ret) && OB_FAIL(estimate_values_table_stats(*table_def))) {
           LOG_WARN("failed to estimate values table stats", K(ret));
-        } else {
+        }
+        if (OB_SUCC(ret)) {
           ObString alias_name;
           ParseNode *alias_node = const_cast<ParseNode *>(table_node.children_[2]);
           if (NULL != alias_node && NULL != alias_node->str_value_) {
@@ -13115,9 +13177,20 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &table_node, TableIte
             new_table_item->is_view_table_ = false;
             if (OB_FAIL(dml_stmt->add_table_item(session_info_, new_table_item))) {
               LOG_WARN("failed to add table item", K(ret));
-            } else if (OB_FAIL(gen_values_table_column_items(table_def->column_cnt_,
-                                                             table_def->column_types_,
-                                                             *new_table_item))) {
+            } else if (0 == data.row_cnt_ &&
+                       OB_FAIL(gen_empty_file_table_column_items(*params_.expr_factory_,
+                                                                 *allocator_,
+                                                                 *dml_stmt,
+                                                                 table_def->column_cnt_,
+                                                                 table_def->column_types_,
+                                                                 table_def->column_names_,
+                                                                 new_table_item->table_id_,
+                                                                 new_table_item->table_name_))) {
+              LOG_WARN("failed to generate column items of empty file table", K(ret));
+            } else if (data.row_cnt_ > 0
+                       && OB_FAIL(gen_values_table_column_items(table_def->column_cnt_,
+                                                                table_def->column_types_,
+                                                                *new_table_item))) {
               LOG_WARN("failed to generate column items", K(ret));
             } else {
               table_item = new_table_item;
