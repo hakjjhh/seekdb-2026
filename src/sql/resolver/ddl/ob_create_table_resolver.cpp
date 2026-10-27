@@ -2378,6 +2378,10 @@ int ObCreateTableResolver::resolve_ai_column_definitions(const ParseNode *node,
       }
     }
   }
+  ObSEArray<ObString, 4> pk_columns;
+  if (OB_SUCC(ret)) {
+    ai_column_collect_pk_columns(node, pk_columns);
+  }
   for (int64_t i = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
     const ParseNode *element = node->children_[i];
     const ParseNode *attr = NULL;
@@ -2429,6 +2433,15 @@ int ObCreateTableResolver::resolve_ai_column_definitions(const ParseNode *node,
           hidden_column.set_data_type(ObIntType);
           hidden_column.set_nullable(true);
           hidden_column.set_is_hidden(true);
+          if (OB_SUCC(ret) && 0 == k) {
+            // a new row of the AI column is pending by default, the worker thread
+            // will pick it up and fill the result column
+            ObObj default_state;
+            default_state.set_int(100);
+            if (OB_FAIL(hidden_column.set_cur_default_value(default_state, false))) {
+              LOG_WARN("failed to set the default value of the ai column state column", K(ret));
+            }
+          }
           if (OB_FAIL(hidden_column.set_column_name(hidden_names[k]))) {
             LOG_WARN("failed to set the hidden column name", K(ret));
           } else if (OB_FAIL(table_schema.add_column(hidden_column))) {
@@ -2447,7 +2460,20 @@ int ObCreateTableResolver::resolve_ai_column_definitions(const ParseNode *node,
           meta.result_spec_column_name_ = hidden_names[2];
           meta.max_retries_ = max_retries;
           meta.is_json_ = column->is_json();
+          meta.result_type_ = static_cast<int32_t>(column->get_data_type());
+          // the model name, the dimension and the prompt template of the
+          // AI expression are kept in the metadata for the worker thread
+          if (OB_FAIL(ai_column_describe_expr(attr->children_[0],
+                                              meta.result_type_,
+                                              *allocator_,
+                                              meta))) {
+            LOG_WARN("failed to describe the ai column expression", K(ret));
+          }
+          if (OB_FAIL(meta.pk_columns_.assign(pk_columns))) {
+            LOG_WARN("failed to set the primary key columns of the ai column", K(ret));
+          }
           if (OB_FAIL(ObAiColumnRegistry::get_instance().add_meta(meta))) {
+          } else if (OB_FAIL(ai_column_worker_start_once())) {
             LOG_WARN("failed to register the ai column metadata", K(ret));
           }
         }

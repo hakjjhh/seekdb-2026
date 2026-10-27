@@ -26,6 +26,8 @@
 #include "sql/ob_sql_init.h"
 #include "sql/resolver/ob_resolver.h"
 #include "sql/resolver/dml/ob_select_stmt.h"
+#include "sql/resolver/ddl/ob_ai_column_meta.h"
+#include "share/system_variable/ob_sys_var_class_type.h"
 #include "sql/resolver/cmd/ob_variable_set_stmt.h"
 #include "sql/resolver/cmd/ob_call_procedure_stmt.h"
 #include "sql/resolver/cmd/ob_anonymous_block_stmt.h"
@@ -1949,6 +1951,45 @@ OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, 
   ObExecContext& ectx = result.get_exec_context();
   int get_plan_err = OB_SUCCESS; //used for judge whether add plan to plan cache
   bool use_plan_cache = session.get_local_ob_enable_plan_cache();
+  if (OB_SUCC(ret)) {
+    bool strict_read = false;
+    if (OB_FAIL(session.get_sys_variable(share::SYS_VAR_AI_COLUMN_STRICT_READ, strict_read))) {
+      LOG_WARN("failed to get the ai column strict read mode", K(ret));
+    } else if (OB_FAIL(ai_column_check_strict_read(trimed_stmt, strict_read))) {
+      LOG_WARN("the ai column is not ready", K(ret));
+      if (OB_ERR_AI_COLUMN_UNFINISHED_TASK == ret) {
+        // a known user error, the client must not lose the connection
+        ectx.set_need_disconnect(false);
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    ObString retry_sql;
+    bool retried = false;
+    if (OB_FAIL(ai_column_rewrite_retry_stmt(trimed_stmt, allocator, retry_sql, retried))) {
+      LOG_WARN("failed to rewrite the ai column retry statement", K(ret));
+    } else if (retried) {
+      trimed_stmt = retry_sql;
+    }
+  }
+  if (OB_SUCC(ret)) {
+    ObString update_sql;
+    bool updated = false;
+    if (OB_FAIL(ai_column_rewrite_update_stmt(trimed_stmt, allocator, update_sql, updated))) {
+      LOG_WARN("failed to rewrite the ai column update statement", K(ret));
+    } else if (updated) {
+      trimed_stmt = update_sql;
+    }
+  }
+  if (OB_SUCC(ret)) {
+    ObString rewritten_sql;
+    bool rewritten = false;
+    if (OB_FAIL(ai_column_rewrite_task_table(trimed_stmt, allocator, rewritten_sql, rewritten))) {
+      LOG_WARN("failed to rewrite the ai column task table", K(ret));
+    } else if (rewritten) {
+      trimed_stmt = rewritten_sql;
+    }
+  }
   ObPlanCacheCtx *pc_ctx = NULL;
   bool is_begin_commit_stmt = false;
 

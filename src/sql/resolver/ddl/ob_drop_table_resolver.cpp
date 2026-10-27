@@ -15,6 +15,7 @@
  */
 
 #include "sql/resolver/ddl/ob_drop_table_resolver.h"
+#include "sql/resolver/ddl/ob_ai_column_meta.h"
 namespace oceanbase
 {
 using namespace common;
@@ -120,6 +121,9 @@ int ObDropTableResolver::resolve(const ParseNode &parse_tree)
                 LOG_USER_ERROR(OB_ERR_NONUNIQ_TABLE, table_item.table_name_.length(), table_item.table_name_.ptr());
               } else if (OB_FAIL(table_item_set->set_refactored(table_item))) {
               } else if (OB_FAIL(drop_table_stmt->add_table_item(table_item))) {
+              } else if (OB_FAIL(ObAiColumnRegistry::get_instance().remove_table(
+                                   table_item.database_name_, table_item.table_name_))) {
+                SQL_RESV_LOG(WARN, "failed to remove the ai column metas", K(ret));
               }
             }
           }

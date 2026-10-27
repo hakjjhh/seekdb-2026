@@ -1829,6 +1829,19 @@ int ObDMLResolver::resolve_basic_column_ref(const ObQualifiedName &q_name, ObRaw
   return ret;
 }
 
+namespace {
+
+// whether the column name is the name of an internal column of an AI column
+bool is_ai_column_internal_name(const ObString &column_name)
+{
+  const char *prefix = "__ai_";
+  const int64_t prefix_len = 5;
+  return column_name.length() >= prefix_len
+      && 0 == strncasecmp(column_name.ptr(), prefix, static_cast<size_t>(prefix_len));
+}
+
+}  // namespace
+
 int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
                                              const ObString &column_name,
                                              bool include_hidden,
@@ -1852,6 +1865,11 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
                          && !table_item.is_fake_cte_table())) {
     ret = OB_ERR_UNEXPECTED;
   } else if (NULL != (col_item = stmt->get_column_item(table_item.table_id_, column_name))) {
+    if (!include_hidden && is_ai_column_internal_name(column_name)) {
+      // the internal columns of the AI columns are hidden columns, they can be
+      // referenced by the internal SQL of the AI column worker
+      include_hidden = true;
+    }
     if (!include_hidden) {
       if (!ObCharset::case_insensitive_equal(column_name, OB_HIDDEN_PK_INCREMENT_COLUMN_NAME)) {
         //do nothing
@@ -1866,6 +1884,11 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
     const ObColumnSchemaV2 *col_schema = NULL;
     const ObTableSchema *table_schema = NULL;
     uint64_t tid = table_item.ref_id_;
+    if (!include_hidden && is_ai_column_internal_name(column_name)) {
+      // the internal columns of the AI columns are hidden columns, they can be
+      // referenced by the internal SQL of the AI column worker
+      include_hidden = true;
+    }
     if (!include_hidden) {
       if (!ObCharset::case_insensitive_equal(column_name, OB_HIDDEN_PK_INCREMENT_COLUMN_NAME)) {
         //do nothing
