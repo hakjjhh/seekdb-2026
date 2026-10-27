@@ -10899,6 +10899,19 @@
     "background_cn": "文件即数据库：允许 SQL 直接查询本地数据文件",
     "ref_url": ""
   },
+  "ai_column_strict_read": {
+    "id": 10755,
+    "name": "ai_column_strict_read",
+    "default_value": "0",
+    "base_value": "0",
+    "data_type": "bool",
+    "info": "Reject reads on an AI column while it still has unfinished AI column tasks.",
+    "flags": "GLOBAL | SESSION ",
+    "publish_version": "",
+    "info_cn": "严格读取 AI 列：当该列仍有未完成任务时拒绝读取",
+    "background_cn": "AI 列物化任务未完成时避免读到不一致的数据",
+    "ref_url": ""
+  },
   "enable_optimizer_rowgoal": {
     "id": 10747,
     "name": "enable_optimizer_rowgoal",

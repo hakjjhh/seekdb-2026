@@ -1407,6 +1407,7 @@ SQL_UNITY_GROUPS = [
         name = "ob_sql_resolver_ddl_0",
         language = "c++",
         srcs = [
+            "src/sql/resolver/ddl/ob_ai_column_meta.cpp",
             "src/sql/resolver/ddl/ob_fts_index_builder_util.cpp",
             "src/sql/resolver/ddl/ob_vec_index_builder_util.cpp",
             "src/sql/resolver/ddl/ob_index_builder_util.cpp",

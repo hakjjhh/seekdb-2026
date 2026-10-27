@@ -2286,6 +2286,11 @@ int ObDDLResolver::resolve_normal_column_attribute(ObColumnSchemaV2 &column,
       {
         break;
       }
+      case T_CONSTR_AI_COLUMN: {
+        // The AI column attributes are resolved by the create table resolver or
+        // the alter table resolver, nothing to do here.
+        break;
+      }
       default:  // won't be here
         ret = OB_ERR_PARSER_SYNTAX;
         SQL_RESV_LOG(WARN, "Wrong column attribute", K(ret), K(attr_node->type_));

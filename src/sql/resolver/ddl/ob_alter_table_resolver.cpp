@@ -17,6 +17,8 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "config_bridge.h"
 #include "sql/resolver/ddl/ob_alter_table_resolver.h"
+#include "sql/resolver/ddl/ob_ai_column_meta.h"
+#include "sql/resolver/ddl/ob_ai_column_meta.h"
 #include "sql/resolver/expr/ob_raw_expr_part_expr_checker.h"
 #include "sql/resolver/dml/ob_delete_resolver.h"
 #include "sql/resolver/ddl/ob_index_builder_util.h"
@@ -3457,6 +3459,8 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
         if (OB_SUCC(ret)) {
           if (OB_FAIL(alter_table_stmt->add_column(alter_column_schema))) {
           } else if (FALSE_IT(alter_table_stmt->set_sql_mode(session_info_->get_sql_mode()))) {
+          } else if (OB_FAIL(resolve_ai_column_definitions(node.children_[i], alter_column_schema))) {
+            LOG_WARN("failed to resolve the ai column definitions", K(ret));
           }
         }
       }
@@ -4497,6 +4501,61 @@ int ObAlterTableResolver::check_semistruct_encoding_type(const ObTableSchema &or
   } else {
     ret = OB_NOT_SUPPORTED;
     LOG_USER_ERROR(OB_NOT_SUPPORTED, "semistruct encoding is not supported");
+  }
+  return ret;
+}
+
+
+int ObAlterTableResolver::resolve_ai_column_definitions(const ParseNode *column_def,
+                                                       const share::schema::AlterColumnSchema &alter_column_schema)
+{
+  int ret = OB_SUCCESS;
+  const ParseNode *attr = ai_column_find_attr(column_def);
+  if (NULL == attr) {
+    // not an AI column
+  } else {
+    ObAlterTableStmt *alter_table_stmt = static_cast<ObAlterTableStmt *>(stmt_);
+    const ObString &column_name = alter_column_schema.get_column_name_str();
+    ObSEArray<ObString, 8> ai_column_names;
+    int64_t max_retries = 0;
+    ObString sync_mode;
+    ObString normalized_expr;
+    // the new column itself is the only AI column of this ALTER statement
+    if (OB_FAIL(ai_column_names.push_back(column_name))) {
+      LOG_WARN("failed to push back the ai column name", K(ret));
+    } else if (OB_FAIL(ai_column_parse_options(attr->children_[1], max_retries, sync_mode))) {
+      LOG_WARN("failed to resolve the ai column options", K(ret));
+    } else if (OB_FAIL(ai_column_check_expr(attr->children_[0],
+                                            NULL,
+                                            ai_column_names,
+                                            alter_column_schema.is_json(),
+                                            *allocator_,
+                                            normalized_expr))) {
+      LOG_WARN("failed to check the ai column expression", K(ret));
+    } else {
+      const char *prefixes[] = {"__ai_state_", "__ai_request_", "__ai_result_spec_"};
+      ObString hidden_names[3];
+      ObAiColumnMeta meta;
+      for (int64_t k = 0; OB_SUCC(ret) && k < 3; ++k) {
+        if (OB_FAIL(ai_column_gen_hidden_name(*allocator_, column_name, prefixes[k], hidden_names[k]))) {
+          LOG_WARN("failed to generate the hidden column name", K(ret));
+        }
+      }
+      if (OB_SUCC(ret)) {
+        meta.db_name_ = database_name_;
+        meta.table_name_ = table_name_;
+        meta.column_name_ = column_name;
+        meta.normalized_expr_ = normalized_expr;
+        meta.state_column_name_ = hidden_names[0];
+        meta.request_column_name_ = hidden_names[1];
+        meta.result_spec_column_name_ = hidden_names[2];
+        meta.max_retries_ = max_retries;
+        meta.is_json_ = alter_column_schema.is_json();
+        if (OB_FAIL(ObAiColumnRegistry::get_instance().add_meta(meta))) {
+          LOG_WARN("failed to register the ai column metadata", K(ret));
+        }
+      }
+    }
   }
   return ret;
 }

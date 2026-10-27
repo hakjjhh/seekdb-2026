@@ -779,6 +779,9 @@ private:
 
   int resolve_values_table_item(const ParseNode &table_node, TableItem *&table_item);
   int resolve_file_table_item(const ParseNode &table_node, TableItem *&table_item);
+  int resolve_ai_column_meta_table_item(const ParseNode &table_node,
+                                        const ParseNode *alias_node,
+                                        TableItem *&table_item);
   int resolve_values_table_for_select(const ParseNode &table_node,
                                       ObValuesTableDef &table_values);
   int resolve_values_table_for_insert(const ParseNode &table_node,

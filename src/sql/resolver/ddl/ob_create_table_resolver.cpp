@@ -16,6 +16,8 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/ddl/ob_create_table_resolver.h"
+#include "sql/resolver/ddl/ob_ai_column_meta.h"
+#include "sql/resolver/ddl/ob_ai_column_meta.h"
 #include "sql/resolver/dml/ob_select_resolver.h"
 #include "sql/resolver/ddl/ob_fts_index_builder_util.h"
 #include "sql/rewrite/ob_transform_utils.h"
@@ -894,6 +896,10 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
           }
         }
       }
+    }
+
+    if (OB_SUCC(ret) && RESOLVE_NON_COL != resolve_rule) {
+      OZ (resolve_ai_column_definitions(node, table_schema));
     }
 
     // A table must have at least one column as a visible column
@@ -2342,5 +2348,114 @@ int ObCreateTableResolver::uk_or_heap_table_pk_add_to_index_list(ObArray<int> &i
   }
   return ret;
 }
+
+int ObCreateTableResolver::resolve_ai_column_definitions(const ParseNode *node,
+                                                        share::schema::ObTableSchema &table_schema)
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<ObString, 8> ai_column_names;
+  if (OB_ISNULL(node)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("the table element list is null", K(ret));
+  }
+  // the AI columns of one table can not depend on each other
+  for (int64_t i = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
+    const ParseNode *element = node->children_[i];
+    const ParseNode *ref_node = NULL;
+    const ParseNode *name_node = NULL;
+    if (NULL == element || T_COLUMN_DEFINITION != element->type_ ||
+        NULL == ai_column_find_attr(element)) {
+      // not an AI column
+    } else if (OB_ISNULL(ref_node = element->children_[0]) || ref_node->num_child_ < 1 ||
+               OB_ISNULL(name_node = ref_node->children_[ref_node->num_child_ - 1]) ||
+               NULL == name_node->str_value_) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected ai column definition", K(ret));
+    } else {
+      ObString column_name(static_cast<int32_t>(name_node->str_len_), name_node->str_value_);
+      if (OB_FAIL(ai_column_names.push_back(column_name))) {
+        LOG_WARN("failed to push back the ai column name", K(ret));
+      }
+    }
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
+    const ParseNode *element = node->children_[i];
+    const ParseNode *attr = NULL;
+    const ParseNode *ref_node = NULL;
+    const ParseNode *name_node = NULL;
+    if (NULL == element || T_COLUMN_DEFINITION != element->type_ ||
+        NULL == (attr = ai_column_find_attr(element))) {
+      // not an AI column
+    } else if (OB_ISNULL(ref_node = element->children_[0]) || ref_node->num_child_ < 1 ||
+               OB_ISNULL(name_node = ref_node->children_[ref_node->num_child_ - 1]) ||
+               NULL == name_node->str_value_) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected ai column definition", K(ret));
+    } else {
+      ObString column_name(static_cast<int32_t>(name_node->str_len_), name_node->str_value_);
+      const ObColumnSchemaV2 *column = table_schema.get_column_schema(column_name);
+      int64_t max_retries = 0;
+      ObString sync_mode;
+      ObString normalized_expr;
+      if (OB_ISNULL(column)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("the ai column is not found in the table schema", K(ret), K(column_name));
+      } else if (OB_FAIL(ai_column_parse_options(attr->children_[1], max_retries, sync_mode))) {
+        LOG_WARN("failed to resolve the ai column options", K(ret));
+      } else if (OB_FAIL(ai_column_check_expr(attr->children_[0],
+                                              element->children_[1],
+                                              ai_column_names,
+                                              column->is_json(),
+                                              *allocator_,
+                                              normalized_expr))) {
+        LOG_WARN("failed to check the ai column expression", K(ret));
+      } else {
+        // every AI column owns three hidden columns: the task state, the request
+        // id and the specification of the result
+        const char *prefixes[] = {"__ai_state_", "__ai_request_", "__ai_result_spec_"};
+        ObString hidden_names[3];
+        for (int64_t k = 0; OB_SUCC(ret) && k < 3; ++k) {
+          if (OB_FAIL(ai_column_gen_hidden_name(*allocator_, column_name, prefixes[k], hidden_names[k]))) {
+            LOG_WARN("failed to generate the hidden column name", K(ret));
+          }
+        }
+        for (int64_t k = 0; OB_SUCC(ret) && k < 3; ++k) {
+          if (NULL != table_schema.get_column_schema(hidden_names[k])) {
+            // the hidden columns were already created by a previous resolving round
+            continue;
+          }
+          ObColumnSchemaV2 hidden_column;
+          hidden_column.set_column_id(gen_column_id());
+          hidden_column.set_data_type(ObIntType);
+          hidden_column.set_nullable(true);
+          hidden_column.set_is_hidden(true);
+          if (OB_FAIL(hidden_column.set_column_name(hidden_names[k]))) {
+            LOG_WARN("failed to set the hidden column name", K(ret));
+          } else if (OB_FAIL(table_schema.add_column(hidden_column))) {
+            LOG_WARN("failed to add the hidden column of the ai column", K(ret));
+          }
+        }
+        if (OB_SUCC(ret)) {
+          ObCreateTableStmt *create_table_stmt = static_cast<ObCreateTableStmt *>(stmt_);
+          ObAiColumnMeta meta;
+          meta.db_name_ = database_name_;
+          meta.table_name_ = table_name_;
+          meta.column_name_ = column_name;
+          meta.normalized_expr_ = normalized_expr;
+          meta.state_column_name_ = hidden_names[0];
+          meta.request_column_name_ = hidden_names[1];
+          meta.result_spec_column_name_ = hidden_names[2];
+          meta.max_retries_ = max_retries;
+          meta.is_json_ = column->is_json();
+          if (OB_FAIL(ObAiColumnRegistry::get_instance().add_meta(meta))) {
+            LOG_WARN("failed to register the ai column metadata", K(ret));
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 }//end namespace sql
 }//end namespace oceanbase
