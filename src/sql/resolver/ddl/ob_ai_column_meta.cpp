@@ -550,8 +550,8 @@ int ai_column_describe_expr(const ParseNode *expr,
       meta.dim_ = dim_node->value_;
     }
   }
-  // parameter 2 of AI_COMPLETE is the prompt expression
-  if (OB_SUCC(ret) && !meta.is_embed_) {
+  // parameter 2 is the prompt of AI_COMPLETE or the text to embed of AI_EMBED
+  if (OB_SUCC(ret)) {
     const ParseNode *prompt_node = func_param(func, 1);
     if (NULL != prompt_node) {
       if (OB_FAIL(collect_prompt_parts(prompt_node, allocator, meta))) {
