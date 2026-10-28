@@ -592,6 +592,7 @@ namespace
 // ---------------------------------------------------------------------------
 
 const int64_t AI_WORKER_INTERVAL_US = 200 * 1000;
+const int64_t AI_WORKER_IDLE_INTERVAL_US = 1000 * 1000;
 const int64_t AI_WORKER_BATCH_SIZE = 64;
 const int64_t AI_WORKER_HTTP_TIMEOUT_SEC = 20;
 const int64_t AI_STATE_DONE = 0;
@@ -1792,12 +1793,22 @@ void *ai_column_worker_thread(void *arg)
   UNUSED(arg);
   LOG_INFO("the ai column worker thread is started");
   while (true) {
-    ObArenaAllocator allocator("AiColWorker");
-    const int ret = ai_worker_run_once(allocator);
-    if (OB_SUCCESS != ret) {
-      LOG_WARN("failed to run one round of the ai column worker", K(ret));
+    if (0 == ObAiColumnRegistry::get_instance().count()) {
+      // no AI column was created yet, the worker keeps quiet and polled
+      // rarely so that it never competes with the user statements
+      usleep(static_cast<unsigned int>(AI_WORKER_IDLE_INTERVAL_US));
+    } else {
+      ObArenaAllocator allocator("AiColWorker");
+      const int ret = ai_worker_run_once(allocator);
+      if (OB_SUCCESS != ret) {
+        LOG_WARN("failed to run one round of the ai column worker", K(ret));
+        // a failed round usually means that a table was dropped, do not
+        // retry it five times per second
+        usleep(static_cast<unsigned int>(AI_WORKER_IDLE_INTERVAL_US));
+      } else {
+        ai_worker_sleep();
+      }
     }
-    ai_worker_sleep();
   }
   return NULL;
 }
@@ -2109,6 +2120,10 @@ int ai_column_rewrite_task_table(const common::ObString &sql,
   int ret = OB_SUCCESS;
   rewritten.reset();
   rewritten_flag = false;
+  // the fast path: nothing to do for a server without any AI column
+  if (0 == ObAiColumnRegistry::get_instance().count()) {
+    return OB_SUCCESS;
+  }
   int64_t pos = find_task_table(sql, 0);
   if (-1 == pos) {
     // the statement does not reference the task table
@@ -2777,6 +2792,10 @@ int ai_column_check_strict_read(const ObString &sql, const bool strict_read)
 {
   int ret = OB_SUCCESS;
   using namespace ai_column_rw;
+  // the fast path: nothing to do for a server without any AI column
+  if (0 == ObAiColumnRegistry::get_instance().count()) {
+    return OB_SUCCESS;
+  }
   if (!strict_read) {
     // the strict read mode is off
   } else {
