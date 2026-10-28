@@ -17,6 +17,7 @@
 
 #include "observer/ob_system_package_load_task.h"
 #include "pl/ob_pl_package_manager.h"
+#include "lib/lock/ob_mutex.h"
 #include "rootserver/ob_admin_job_table_operator.h"
 #include "share/ob_server_struct.h"
 #include "share/rc/ob_server_runtime.h"
@@ -118,14 +119,18 @@ void ObSystemPackageLoadTask::runTimerTask()
   } else if (!share::server_is_write_enabled()) {
     LOG_INFO("read-only server skips loading sys package");
   } else if (GCTX.sys_package_ready_) {
-    LOG_INFO("sys package already loaded");
+    LOG_DEBUG("sys package already loaded");
+  } else if (OB_SUCCESS != load_lock_.trylock()) {
+    // another timer thread is already loading the packages
   } else if (OB_FAIL(load_system_package_())) {
+    load_lock_.unlock();
     fail_count_++;
     if (fail_count_ >= 5) {
       LOG_ERROR("failed to execute system package load task, will retry", KR(ret), K_(fail_count));
     } else {
     }
   } else {
+    load_lock_.unlock();
     fail_count_ = 0;
     LOG_INFO("finish loading sys packages");
   }

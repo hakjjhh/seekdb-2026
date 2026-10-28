@@ -18,6 +18,7 @@
 
 #include "common/ob_timeout_ctx.h"
 #include "lib/task/ob_timer.h"
+#include "lib/lock/ob_mutex.h"
 #include "lib/utility/ob_macro_utils.h"
 #include "share/ob_define.h"
 
@@ -47,7 +48,12 @@ private:
 private:
   bool inited_;
   int64_t fail_count_;
-  static const int64_t SCHEDULE_INTERVAL_US = 3 * 1000 * 1000L; // 3s
+  // only one thread may compile the system packages at a time
+  lib::ObMutex load_lock_;
+  // The first tick is what unblocks the first `call <package>` statement of
+  // a cold server, so keep the cadence short; once loaded the task only
+  // reads the ready flag.
+  static const int64_t SCHEDULE_INTERVAL_US = 300 * 1000L; // 300ms
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObSystemPackageLoadTask);
