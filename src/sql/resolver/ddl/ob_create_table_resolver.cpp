@@ -2382,6 +2382,9 @@ int ObCreateTableResolver::resolve_ai_column_definitions(const ParseNode *node,
   if (OB_SUCC(ret)) {
     ai_column_collect_pk_columns(node, pk_columns);
   }
+  // the metadata of an AI column is only published when the whole statement
+  // succeeds, otherwise a failed create table would leave stale entries
+  ObSEArray<ObAiColumnMeta, 8> pending_metas;
   for (int64_t i = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
     const ParseNode *element = node->children_[i];
     const ParseNode *attr = NULL;
@@ -2471,12 +2474,18 @@ int ObCreateTableResolver::resolve_ai_column_definitions(const ParseNode *node,
           }
           if (OB_FAIL(meta.pk_columns_.assign(pk_columns))) {
             LOG_WARN("failed to set the primary key columns of the ai column", K(ret));
-          }
-          if (OB_FAIL(ObAiColumnRegistry::get_instance().add_meta(meta))) {
-          } else if (OB_FAIL(ai_column_worker_start_once())) {
-            LOG_WARN("failed to register the ai column metadata", K(ret));
+          } else if (OB_FAIL(pending_metas.push_back(meta))) {
+            LOG_WARN("failed to remember the ai column metadata", K(ret));
           }
         }
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < pending_metas.count(); ++i) {
+      if (OB_FAIL(ObAiColumnRegistry::get_instance().add_meta(pending_metas.at(i)))) {
+      } else if (OB_FAIL(ai_column_worker_start_once())) {
+        LOG_WARN("failed to register the ai column metadata", K(ret));
       }
     }
   }

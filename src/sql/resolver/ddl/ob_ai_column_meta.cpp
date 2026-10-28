@@ -7,6 +7,9 @@
 
 #include <string.h>
 #include "sql/resolver/ddl/ob_ai_column_meta.h"
+#include "share/schema/ob_schema_getter_guard.h"
+#include "share/schema/ob_multi_version_schema_service.h"
+
 #include "lib/allocator/ob_malloc.h"
 #include "lib/oblog/ob_log_module.h"
 #include "share/ob_errno.h"
@@ -2002,7 +2005,17 @@ int build_task_table_query(const ObIArray<ObAiColumnMeta> &metas,
   }
   if (OB_SUCC(ret)) {
     if (0 == branch_cnt) {
-      ret = OB_ENTRY_NOT_EXIST;
+      // no AI column is alive, the task table must still be a valid empty
+      // relation, otherwise the statement would reference a missing table
+      if (OB_FAIL(sql.append("(select cast(0 as signed) as table_id, "
+                             "cast('' as char(1)) as request_id, "
+                             "cast(0 as signed) as state, "
+                             "cast(0 as signed) as retry_count, "
+                             "cast('' as char(1)) as rowkey_predicate, "
+                             "cast('2000-01-01 00:00:00.000000' as datetime(6)) "
+                             "as eligible_ts from dual where 1 = 0)"))) {
+        LOG_WARN("failed to append the empty task table", K(ret));
+      }
     } else if (OB_FAIL(sql.append(")"))) {
       LOG_WARN("failed to append the query", K(ret));
     }
@@ -2100,14 +2113,31 @@ int ai_column_rewrite_task_table(const common::ObString &sql,
   if (-1 == pos) {
     // the statement does not reference the task table
   } else {
+    ObSEArray<ObAiColumnMeta, 16> all_metas;
     ObSEArray<ObAiColumnMeta, 16> metas;
     ObSqlString task_query;
     ObSqlString out;
-    if (OB_FAIL(ObAiColumnRegistry::get_instance().get_metas(metas))) {
+    share::schema::ObSchemaGetterGuard guard;
+    if (OB_FAIL(ObAiColumnRegistry::get_instance().get_metas(all_metas))) {
       LOG_WARN("failed to get the ai column metas", K(ret));
-    } else if (0 == metas.count()) {
-      // no AI column at all, the task table is empty
-      ret = OB_ENTRY_NOT_EXIST;
+    } else if (OB_FAIL(GCTX.schema_service_->get_runtime_schema_guard(guard))) {
+      LOG_WARN("failed to get the schema guard", K(ret));
+    }
+    // a table may be dropped without notifying the registry (drop database for
+    // example), a dead entry must not be turned into a query branch
+    for (int64_t i = 0; OB_SUCC(ret) && i < all_metas.count(); ++i) {
+      const share::schema::ObTableSchema *table_schema = NULL;
+      const int tmp_ret = guard.get_table_schema(all_metas.at(i).db_name_,
+                                                 all_metas.at(i).table_name_,
+                                                 false,
+                                                 table_schema);
+      if (OB_SUCCESS == tmp_ret && NULL != table_schema) {
+        if (OB_FAIL(metas.push_back(all_metas.at(i)))) {
+          LOG_WARN("failed to push back the ai column meta", K(ret));
+        }
+      }
+    }
+    if (OB_FAIL(ret)) {
     } else if (OB_FAIL(build_task_table_query(metas, allocator, task_query))) {
       LOG_WARN("failed to build the task table query", K(ret));
     } else {
