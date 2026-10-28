@@ -67,6 +67,11 @@ public:
 
   int find(const ObFTSingleWord &word, ObFTWordCode &code) const;
 
+  // Byte view overload for the hot paths. Callers such as the double array trie
+  // reader already hold the word bytes, so copying them into an ObFTSingleWord
+  // before the lookup is pure waste.
+  int find(const char *ptr, const int32_t len, ObFTWordCode &code) const;
+
 private:
   struct Header header_;
 } __attribute__((packed));

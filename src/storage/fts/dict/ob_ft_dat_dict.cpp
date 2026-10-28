@@ -227,10 +227,7 @@ template <typename DATA_TYPE>
 int ObFTDATBuilder<DATA_TYPE>::encode(const ObString &word, ObFTWordCode &code, bool add)
 {
   int ret = OB_SUCCESS;
-  ObFTWordCode code_value;
-  ObFTSingleWord single_word;
-  single_word.set_word(word.ptr(), word.length());
-  ret = map_->find(single_word, code);
+  ret = map_->find(word.ptr(), word.length(), code);
   if (OB_ENTRY_NOT_EXIST == ret) {
     if (add) {
       code = next_code_++;
@@ -258,9 +255,7 @@ int ObFTDATReader<DATA_TYPE>::match_with_hit(const ObString &ft_char,
   int32_t *base = reinterpret_cast<int32_t *>(dat_->buff + dat_->base_offset_);
   int32_t *check = reinterpret_cast<int32_t *>(dat_->buff + dat_->check_offset_);
 
-  ObFTSingleWord word;
-  word.set_word(ft_char.ptr(), ft_char.length());
-  if (OB_FAIL(dat_->get_map()->find(word, code)) && OB_ENTRY_NOT_EXIST != ret) {
+  if (OB_FAIL(map->find(ft_char.ptr(), ft_char.length(), code)) && OB_ENTRY_NOT_EXIST != ret) {
   } else if (OB_ENTRY_NOT_EXIST == ret) {
     ret = OB_SUCCESS;
     hit.set_unmatch();
@@ -299,19 +294,61 @@ template class ObFTDATReader<void>;
 
 ObArrayHashMap *ObFTDAT::get_map() { return reinterpret_cast<ObArrayHashMap *>(buff); }
 
+namespace
+{
+// The bucket reduction and the probe step have to be identical for insert() and
+// find(), and they only have to stay consistent inside one binary: the hash
+// map is materialized together with the double array trie block that contains
+// it, and such a block never outlives the process that built it.
+//
+// Both helpers are division free. The previous version evaluated
+// "hash % capacity_" once and "(index + 3) % capacity_" for every additional
+// probe, so a 64 bit integer division sat on the critical path of the lookup
+// it was supposed to protect. That hurt most on the miss path, where the
+// probe chain is the longest and a full lookup could burn several divisions.
+const uint64_t PROBE_STEP = 3;
+
+inline uint64_t map_bucket(uint64_t hash, uint64_t capacity)
+{
+  return 0 == capacity ? 0 : (uint64_t)((unsigned __int128)hash * capacity >> 64);
+}
+
+// Equal to (index + PROBE_STEP) % capacity while capacity > PROBE_STEP, which
+// estimate_capacity() guarantees (its minimum is the prime 101).
+inline uint64_t map_next(uint64_t index, uint64_t capacity)
+{
+  index += PROBE_STEP;
+  if (index >= capacity) {
+    index -= capacity;
+  }
+  return index;
+}
+} // namespace
+
 int ObArrayHashMap::find(const ObFTSingleWord &word, ObFTWordCode &code) const
 {
+  const ObString str = word.get_word();
+  return find(str.ptr(), str.length(), code);
+}
+
+int ObArrayHashMap::find(const char *ptr, const int32_t len, ObFTWordCode &code) const
+{
   int ret = OB_ENTRY_NOT_EXIST;
-  uint64_t hash = word.get_word().hash();
-  uint64_t index = hash % header_.capacity_;
+  const uint64_t capacity = header_.capacity_;
+  // ObString::hash() is murmurhash over (ptr, len), the very value the old code
+  // derived from the copy, so the distribution is unchanged.
+  uint64_t index = map_bucket(ObString(len, ptr).hash(), capacity);
   while (header_.data[index].used) {
-    if (header_.data[index].word == word) {
-      code = header_.data[index].code;
+    const uint64_t next = map_next(index, capacity);
+    __builtin_prefetch(&header_.data[next], 0, 1);
+    const Entry &entry = header_.data[index];
+    if (len == static_cast<int32_t>(entry.word.word_len)
+        && 0 == MEMCMP(entry.word.word, ptr, len)) {
+      code = entry.code;
       ret = OB_SUCCESS;
       break;
-    } else {
-      index = (index + 3) % header_.capacity_;
     }
+    index = next;
   }
   return ret;
 }
@@ -319,10 +356,10 @@ int ObArrayHashMap::find(const ObFTSingleWord &word, ObFTWordCode &code) const
 int ObArrayHashMap::insert(const ObString &key, ObFTWordCode code)
 {
   int ret = OB_SUCCESS;
-  uint64_t hash = key.hash();
-  uint64_t index = hash % header_.capacity_;
+  const uint64_t capacity = header_.capacity_;
+  uint64_t index = map_bucket(key.hash(), capacity);
   while (header_.data[index].used) {
-    index = (index + 3) % header_.capacity_;
+    index = map_next(index, capacity);
   }
 
   header_.data[index].code = code;
