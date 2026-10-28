@@ -74,35 +74,42 @@ void ObStopWordChecker::destroy()
 int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
 {
   int ret = OB_SUCCESS;
-  
-  
-  common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
+  const common::ObString src_str = word.get_word().get_string();
+  const common::ObCollationType src_cs_type = word.get_collation_type();
+  const common::ObCollationType dst_cs_type = stopword_type_.get_collation_type();
+  common::ObString cmp_str;
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
   } else if (OB_UNLIKELY(word.empty())) {
     ret = OB_INVALID_ARGUMENT;
+  } else if (common::ObCharset::charset_type_by_coll(src_cs_type)
+             == common::ObCharset::charset_type_by_coll(dst_cs_type)) {
+    // ObCharset::charset_convert() only aliases the input when the charset is unchanged,
+    // so compare the word in place and skip constructing a temporary arena for every probe.
+    cmp_str = src_str;
   } else {
-    common::ObString cmp_str;
-    // do nothing set out with in if type is the same.
+    common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
     if (OB_FAIL(common::ObCharset::charset_convert(
                                        allocator,
-                                       word.get_word().get_string(),
-                                       word.get_collation_type(),
-                                       stopword_type_.get_collation_type(),
+                                       src_str,
+                                       src_cs_type,
+                                       dst_cs_type,
                                        cmp_str))) {
-    } else {
-      ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
-      ret = stopword_set_.exist_refactored(converted);
-      if (OB_HASH_NOT_EXIST == ret) {
-        is_stopword = false;
-        ret = OB_SUCCESS;
-      } else if (OB_HASH_EXIST == ret) {
-        is_stopword = true;
-        ret = OB_SUCCESS;
-      } else if (OB_SUCC(ret)) {
-        ret = OB_ERR_UNEXPECTED;
-      } else {
-      }
+      LOG_WARN("failed to convert charset", K(ret));
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
+    ret = stopword_set_.exist_refactored(converted);
+    if (OB_HASH_NOT_EXIST == ret) {
+      is_stopword = false;
+      ret = OB_SUCCESS;
+    } else if (OB_HASH_EXIST == ret) {
+      is_stopword = true;
+      ret = OB_SUCCESS;
+    } else if (OB_SUCC(ret)) {
+      ret = OB_ERR_UNEXPECTED;
     }
   }
   return ret;

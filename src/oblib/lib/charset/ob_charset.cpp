@@ -551,8 +551,17 @@ int ObCharset::strcmp(ObCollationType collation_type,
                       int64_t str2_len)
 {
   int result = 0;
-  if (is_argument_valid(collation_type, str1, str1_len, str2, str2_len)) {
-    const ObCharsetInfo *cs = get_charset(collation_type);
+  // is_argument_valid() bounds-checks the collation, runs a switch over the retained
+  // collations and re-checks the pointers, then get_charset() repeats the bounds check
+  // and the array lookup. Resolve the ObCharsetInfo once instead: get_charset() already
+  // returns NULL for an out of range or non retained collation, so the accept set and
+  // the returned value are unchanged, only the diagnostics for invalid arguments are
+  // dropped.
+  const ObCharsetInfo *cs = get_charset(collation_type);
+  if (OB_NOT_NULL(cs) && OB_NOT_NULL(cs->coll)
+      && str1_len >= 0 && str2_len >= 0
+      && (NULL != str1 || 0 == str1_len)
+      && (NULL != str2 || 0 == str2_len)) {
     const bool t_is_prefix = false;
     result = cs->coll->strnncoll(cs,
                               reinterpret_cast<const unsigned char *>(str1),
@@ -571,8 +580,12 @@ int ObCharset::strcmpsp(ObCollationType collation_type,
                         bool cmp_endspace)
 {
   int result = 0;
-  if (is_argument_valid(collation_type, str1, str1_len, str2, str2_len)) {
-    const ObCharsetInfo *cs = get_charset(collation_type);
+  // See ObCharset::strcmp() above: same accept set, one charset resolution.
+  const ObCharsetInfo *cs = get_charset(collation_type);
+  if (OB_NOT_NULL(cs) && OB_NOT_NULL(cs->coll)
+      && str1_len >= 0 && str2_len >= 0
+      && (NULL != str1 || 0 == str1_len)
+      && (NULL != str2 || 0 == str2_len)) {
     result = cs->coll->strnncollsp(cs,
                                 reinterpret_cast<const unsigned char *>(str1),
                                 str1_len,

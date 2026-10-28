@@ -850,7 +850,7 @@ int ObFtsIndexBuildTask::wait_aux_table_complement()
                                                       unused_user_msg_len))) {
             if (OB_ENTRY_NOT_EXIST == ret) {
               ret = OB_SUCCESS;
-              LOG_INFO("ddl task not finish", K(task_key),
+              LOG_TRACE("ddl task not finish", K(task_key),
                   K(child_task_id), K(target_object_id));
             } else {
             }
