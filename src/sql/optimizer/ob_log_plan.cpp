@@ -12034,11 +12034,26 @@ int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_mat
   } else if (OB_FAIL(prepare_text_retrieval_info(table_scan->get_real_ref_table_id(),
                                                  table_scan->get_index_table_id(),
                                                  match_against,
-                                                 table_scan->get_text_retrieval_info()))) {
+                                                 table_scan->get_text_retrieval_info(),
+                                                 true))) {
   } else {
     ObTextRetrievalInfo &tr_info = table_scan->get_text_retrieval_info();
     tr_info.match_expr_ = match_against;
     tr_info.pushdown_match_filter_ = match_pred;
+    // [batchD fix] The transform-layer check may decide that the bm25 score value is not
+    // required (MATCH(...) AGAINST(...) compared with 0 is an existence test). But if the
+    // pushed down match filter is not the bare match expr (e.g. wrapped by a comparison),
+    // code generator still has to generate the match expr runtime tree, which depends on
+    // inv_idx_agg/doc_agg ctdefs that are only allocated when need_calc_relevance is true.
+    // Keep the fast path only for pure boolean usage, otherwise fall back to accurate score.
+    if (!tr_info.need_calc_relevance_ && match_pred != static_cast<ObRawExpr *>(match_against)) {
+      bool pure_bool_usage = (T_OP_BOOL == match_pred->get_expr_type()
+                              && 1 == match_pred->get_param_count()
+                              && match_pred->get_param_expr(0) == static_cast<ObRawExpr *>(match_against));
+      if (!pure_bool_usage) {
+        tr_info.need_calc_relevance_ = true;
+      }
+    }
     // The mapping table is absent when the data-table rowkey is used as the document ID.
     table_scan->set_doc_id_index_table_id(tr_info.doc_id_idx_tid_);
     if (table_scan->is_vec_adaptive_scan() || table_scan->is_vec_idx_scan_post_filter()) {
@@ -12170,7 +12185,8 @@ int ObLogPlan::prepare_text_retrieval_merge(const ObIArray<ObRawExpr *> &merge_m
 int ObLogPlan::prepare_text_retrieval_info(const uint64_t ref_table_id,
                                            const uint64_t index_table_id,
                                            ObMatchFunRawExpr *match_against,
-                                           ObTextRetrievalInfo &tr_info)
+                                           ObTextRetrievalInfo &tr_info,
+                                           const bool allow_skip_calc_relevance)
 {
   int ret = OB_SUCCESS;
   ObSchemaGetterGuard *schema_guard = NULL;
@@ -12251,18 +12267,23 @@ int ObLogPlan::prepare_text_retrieval_info(const uint64_t ref_table_id,
     }
   }
   if (OB_SUCC(ret)) {
-    /*
     if (OB_FAIL(ObTransformUtils::check_need_calc_match_score(get_optimizer_context().get_exec_ctx(),
                                                               get_stmt(),
                                                               match_against,
                                                               need_calc_relevance,
                                                               constraints))) {
       LOG_WARN("failed to check need calc relevance", K(ret));
+    } else if (!allow_skip_calc_relevance && FALSE_IT(need_calc_relevance = true)) {
+      // [batchD fix2] Skipping the bm25 score is only proven safe for the main text
+      // retrieval scan whose entire match predicate is pushed down as a boolean
+      // existence filter. For functional lookup / match score / index merge paths the
+      // code generator still has to generate the match expr runtime tree, which
+      // requires the inv_idx_agg/doc_agg ctdefs allocated only when
+      // need_calc_relevance is true, otherwise hard parse fails with OB_ERR_UNEXPECTED.
     } else if (!need_calc_relevance &&
                OB_FAIL(append_array_no_dup(get_optimizer_context().get_query_ctx()->all_expr_constraints_, constraints))) {
       LOG_WARN("failed to append array no dup", K(ret));
     }
-    */
     tr_info.match_expr_ = match_against;
     tr_info.inv_idx_tid_ = inv_idx_tid;
     tr_info.fwd_idx_tid_ = fwd_idx_tid;

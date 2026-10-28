@@ -2000,6 +2000,12 @@ private:
                             ObIArray<ObRawExpr*> &view_exprs);
 
 public:
+  // check whether the score calculated by match expr is actually utilized
+  static int check_need_calc_match_score(ObExecContext *exec_ctx,
+                                         const ObDMLStmt *stmt,
+                                         ObRawExpr *match_expr,
+                                         bool &need_calc,
+                                         ObIArray<ObExprConstraint> &constraints);
   static int extract_shared_exprs(ObDMLStmt *parent, 
                                   ObSelectStmt *view_stmt,
                                   ObIArray<ObRawExpr *> &common_exprs,
