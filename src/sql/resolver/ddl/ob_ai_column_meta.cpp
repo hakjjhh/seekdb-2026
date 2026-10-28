@@ -2443,6 +2443,39 @@ const ObAiColumnMeta *find_meta(const ObIArray<ObAiColumnMeta> &metas,
 
 }  // namespace ai_column_rw
 
+// a comma outside the parenthesis and the quoted text separates the actions of
+// an alter table statement
+static bool has_top_level_comma(const ObString &text)
+{
+  bool found = false;
+  int64_t depth = 0;
+  int64_t pos = 0;
+  while (!found && pos < text.length()) {
+    const char c = text.ptr()[pos];
+    if ('\'' == c || '`' == c || '"' == c) {
+      const char quote = c;
+      ++pos;
+      while (pos < text.length() && text.ptr()[pos] != quote) {
+        if ('\\' == text.ptr()[pos]) {
+          ++pos;
+        }
+        ++pos;
+      }
+      ++pos;
+    } else {
+      if ('(' == c) {
+        ++depth;
+      } else if (')' == c) {
+        --depth;
+      } else if (',' == c && 0 == depth) {
+        found = true;
+      }
+      ++pos;
+    }
+  }
+  return found;
+}
+
 int ai_column_rewrite_retry_stmt(const ObString &sql,
                                  ObIAllocator &allocator,
                                  ObString &rewritten,
@@ -2471,6 +2504,7 @@ int ai_column_rewrite_retry_stmt(const ObString &sql,
   } else if (!read_ident(sql, pos, column)) {
     ret = OB_NOT_SUPPORTED;
     LOG_WARN("failed to parse the retried ai column", K(ret));
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
   } else {
     int64_t p = pos;
     skip_space(sql, p);
@@ -2478,10 +2512,19 @@ int ai_column_rewrite_retry_stmt(const ObString &sql,
     if (p < sql.length() && ',' == sql.ptr()[p]) {
       // RETRY can not be combined with another alter table action
       ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
     } else if (read_word(sql, p, "where")) {
       pred.assign_ptr(sql.ptr() + p, static_cast<int32_t>(sql.length() - p));
+      if (has_top_level_comma(pred)) {
+        // RETRY can not be combined with another alter table action
+        ret = OB_NOT_SUPPORTED;
+        LOG_WARN("the retry predicate contains another alter table action",
+                 K(ret), K(pred));
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
+      }
     } else if (p < sql.length()) {
       ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
     }
     ObSEArray<ObAiColumnMeta, 16> metas;
     const ObAiColumnMeta *meta = NULL;
@@ -2492,6 +2535,7 @@ int ai_column_rewrite_retry_stmt(const ObString &sql,
     } else if (NULL == (meta = find_meta(metas, db, table, column))) {
       ret = OB_NOT_SUPPORTED;
       LOG_WARN("retrying a column that is not an ai column", K(ret), K(column));
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
     } else {
       ObSqlString out;
       if (OB_FAIL(out.append_fmt("update "))) {

@@ -1957,10 +1957,9 @@ OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, 
       LOG_WARN("failed to get the ai column strict read mode", K(ret));
     } else if (OB_FAIL(ai_column_check_strict_read(trimed_stmt, strict_read))) {
       LOG_WARN("the ai column is not ready", K(ret));
-      if (OB_ERR_AI_COLUMN_UNFINISHED_TASK == ret) {
-        // a known user error, the client must not lose the connection
-        ectx.set_need_disconnect(false);
-      }
+      // the statement is rejected with a user error, the client must not lose
+      // the connection
+      ectx.set_need_disconnect(false);
     }
   }
   if (OB_SUCC(ret)) {
@@ -1968,6 +1967,9 @@ OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, 
     bool retried = false;
     if (OB_FAIL(ai_column_rewrite_retry_stmt(trimed_stmt, allocator, retry_sql, retried))) {
       LOG_WARN("failed to rewrite the ai column retry statement", K(ret));
+      // the statement is rejected with a user error, the client must not lose
+      // the connection
+      ectx.set_need_disconnect(false);
     } else if (retried) {
       trimed_stmt = retry_sql;
     }
@@ -1977,6 +1979,7 @@ OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, 
     bool updated = false;
     if (OB_FAIL(ai_column_rewrite_update_stmt(trimed_stmt, allocator, update_sql, updated))) {
       LOG_WARN("failed to rewrite the ai column update statement", K(ret));
+      ectx.set_need_disconnect(false);
     } else if (updated) {
       trimed_stmt = update_sql;
     }
@@ -1986,6 +1989,7 @@ OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, 
     bool rewritten = false;
     if (OB_FAIL(ai_column_rewrite_task_table(trimed_stmt, allocator, rewritten_sql, rewritten))) {
       LOG_WARN("failed to rewrite the ai column task table", K(ret));
+      ectx.set_need_disconnect(false);
     } else if (rewritten) {
       trimed_stmt = rewritten_sql;
     }
