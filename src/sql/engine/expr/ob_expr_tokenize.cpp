@@ -375,7 +375,12 @@ int ObExprTokenize::TokenizeParam::reform_parser_properties(const ObString &prop
   int ret = OB_SUCCESS;
   storage::ObFTParserJsonProps parser_properties;
 
-  if (OB_FAIL(parser_properties.init())) {
+  if (properties.empty()) {
+    // No user supplied parser properties: the built-in defaults depend only on the parser
+    // name, and ObFTParseHelper::init applies exactly the same defaults for an empty
+    // property string, so the JSON parse/rebuild/serialize round trip is pure overhead.
+    properties_.reset();
+  } else if (OB_FAIL(parser_properties.init())) {
   } else if (OB_FAIL(parser_properties.parse_from_valid_str(properties))) {
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "parser properties invalid.");
   } else if (OB_FAIL(parser_properties.rebuild_props_for_ddl(parser_name_,
