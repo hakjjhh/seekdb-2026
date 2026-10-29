@@ -36,6 +36,11 @@
 #include "storage/fts/ik/ob_ik_quantifier_processor.h"
 #include "storage/fts/ik/ob_ik_surrogate_processor.h"
 
+#include "lib/allocator/page_arena.h"
+#include "lib/lock/ob_mutex.h"
+
+#include <atomic>
+
 namespace oceanbase
 {
 namespace storage
@@ -228,45 +233,191 @@ int ObIKFTParserDesc::get_add_word_flag(ObAddWordFlag &flag) const
   return ret;
 }
 
+namespace
+{
+// The built-in IK dictionaries are immutable once loaded, but every ObIKFTParser used to
+// load the KV-cache ranges and rebuild the range dictionaries again: once per document for
+// index build and once per TOKENIZE() call.  Keep one initialized copy per process.
+//
+// The singleton is intentionally never destroyed: the dictionaries have to outlive every
+// parser, and releasing KV-cache handles from a static destructor can run after the cache
+// itself has already been torn down.
+class ObIKSharedDicts
+{
+public:
+  static ObIKSharedDicts &instance()
+  {
+    static ObIKSharedDicts shared_dicts;
+    return shared_dicts;
+  }
+
+  // available is false when the caller has to fall back to its own dictionaries.
+  int get(ObFTDictHub *hub,
+          ObIFTDict *&main_dict,
+          ObIFTDict *&quan_dict,
+          ObIFTDict *&stop_dict,
+          bool &available)
+  {
+    int ret = OB_SUCCESS;
+    available = false;
+    if (OB_ISNULL(hub)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (ready_.load(std::memory_order_acquire)) {
+      if (hub_ == hub) {
+        main_dict = main_dict_;
+        quan_dict = quan_dict_;
+        stop_dict = stop_dict_;
+        available = true;
+      }
+    } else {
+      lib::ObMutexGuard guard(mutex_);
+      if (!ready_.load(std::memory_order_acquire)) {
+        if (OB_FAIL(build(hub))) {
+          LOG_WARN("build shared ik dictionaries failed", K(ret));
+        } else {
+          ready_.store(true, std::memory_order_release);
+        }
+      }
+      if (OB_SUCC(ret) && hub_ == hub) {
+        main_dict = main_dict_;
+        quan_dict = quan_dict_;
+        stop_dict = stop_dict_;
+        available = true;
+      }
+    }
+    return ret;
+  }
+
+private:
+  ObIKSharedDicts()
+    : alloc_(lib::ObMemAttr("IKSharedDict")),
+      mutex_(),
+      hub_(nullptr),
+      main_dict_(nullptr),
+      quan_dict_(nullptr),
+      stop_dict_(nullptr)
+  {
+    ready_.store(false);
+  }
+  ~ObIKSharedDicts() {}
+
+  int build_one(const ObFTDictDesc &desc, ObIFTDict *&dict)
+  {
+    int ret = OB_SUCCESS;
+    ObFTCacheRangeContainer *container = nullptr;
+    if (OB_ISNULL(container = OB_NEWx(ObFTCacheRangeContainer, &alloc_, alloc_))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else if (OB_FAIL(hub_->load_cache(desc, *container))) {
+      if (OB_ENTRY_NOT_EXIST == ret) {
+        ret = OB_SUCCESS;
+        if (OB_FAIL(hub_->build_cache(desc, *container))) {
+        }
+      }
+    }
+    if (OB_FAIL(ret)) {
+    } else if (OB_ISNULL(dict = OB_NEWx(ObFTRangeDict, &alloc_, alloc_, container, desc))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else if (OB_FAIL(dict->init())) {
+      OB_DELETEx(ObIFTDict, &alloc_, dict);
+      dict = nullptr;
+    }
+    return ret;
+  }
+
+  int build(ObFTDictHub *hub)
+  {
+    int ret = OB_SUCCESS;
+    ObFTDictDesc main_dict_desc("main_dict",
+                                ObFTDictType::DICT_IK_MAIN,
+                                ObCharsetType::CHARSET_UTF8MB4,
+                                ObCollationType::CS_TYPE_UTF8MB4_BIN);
+    ObFTDictDesc quan_dict_desc("quan_dict",
+                                ObFTDictType::DICT_IK_QUAN,
+                                ObCharsetType::CHARSET_UTF8MB4,
+                                ObCollationType::CS_TYPE_UTF8MB4_BIN);
+    ObFTDictDesc stopword_dict_desc("stopword",
+                                    ObFTDictType::DICT_IK_STOP,
+                                    ObCharsetType::CHARSET_UTF8MB4,
+                                    ObCollationType::CS_TYPE_UTF8MB4_BIN);
+    hub_ = hub;
+    if (OB_FAIL(build_one(main_dict_desc, main_dict_))) {
+    } else if (OB_FAIL(build_one(quan_dict_desc, quan_dict_))) {
+    } else if (OB_FAIL(build_one(stopword_dict_desc, stop_dict_))) {
+    }
+    return ret;
+  }
+
+private:
+  ObArenaAllocator alloc_;
+  lib::ObMutex mutex_;
+  std::atomic<bool> ready_;
+  ObFTDictHub *hub_;
+  ObIFTDict *main_dict_;
+  ObIFTDict *quan_dict_;
+  ObIFTDict *stop_dict_;
+
+  DISALLOW_COPY_AND_ASSIGN(ObIKSharedDicts);
+};
+} // namespace
+
 int ObIKFTParser::init_dict(const ObFTParserParam &param)
 {
   int ret = OB_SUCCESS;
-  ObIFTDict *tmp_dict = nullptr;
+  bool use_shared = false;
 
   if (OB_ISNULL(hub_)) {
     ret = OB_ERR_UNEXPECTED;
-  }
-
-  ObFTRangeDict *dict = nullptr;
-  ObFTDictDesc main_dict_desc("main_dict",
-                              ObFTDictType::DICT_IK_MAIN,
-                              ObCharsetType::CHARSET_UTF8MB4,
-                              ObCollationType::CS_TYPE_UTF8MB4_BIN);
-
-  ObFTDictDesc quan_dict_desc("quan_dict",
-                              ObFTDictType::DICT_IK_QUAN,
-                              ObCharsetType::CHARSET_UTF8MB4,
-                              ObCollationType::CS_TYPE_UTF8MB4_BIN);
-
-  ObFTDictDesc stopword_dict_desc("stopword",
-                                  ObFTDictType::DICT_IK_STOP,
-                                  ObCharsetType::CHARSET_UTF8MB4,
-                                  ObCollationType::CS_TYPE_UTF8MB4_BIN);
-
-  if (should_read_newest_table()) {
-    // clear dict cache, always false now
-  } else {
-    if (OB_FAIL(init_single_dict(main_dict_desc, cache_main_))) {
-    } else if (OB_FAIL(init_single_dict(quan_dict_desc, cache_quan_))) {
-    } else if (OB_FAIL(init_single_dict(stopword_dict_desc, cache_stop_))) {
+  } else if (!should_read_newest_table()) {
+    ObIFTDict *main_dict = nullptr;
+    ObIFTDict *quan_dict = nullptr;
+    ObIFTDict *stop_dict = nullptr;
+    bool available = false;
+    const int shared_ret =
+        ObIKSharedDicts::instance().get(hub_, main_dict, quan_dict, stop_dict, available);
+    if (OB_SUCCESS != shared_ret) {
+      LOG_WARN("get shared ik dictionaries failed, fall back", K(shared_ret));
+    } else if (available) {
+      dict_main_ = main_dict;
+      dict_quan_ = quan_dict;
+      dict_stop_ = stop_dict;
+      dict_shared_ = true;
+      use_shared = true;
     }
   }
 
-  if (OB_FAIL(ret)) {
-    // already logged.
-  } else if (OB_FAIL(build_dict_from_cache(main_dict_desc, cache_main_, dict_main_))) {
-  } else if (OB_FAIL(build_dict_from_cache(quan_dict_desc, cache_quan_, dict_quan_))) {
-  } else if (OB_FAIL(build_dict_from_cache(stopword_dict_desc, cache_stop_, dict_stop_))) {
+  if (OB_FAIL(ret) || use_shared) {
+    // shared dictionaries are ready (or an earlier error is being reported)
+  } else {
+    ObFTDictDesc main_dict_desc("main_dict",
+                                ObFTDictType::DICT_IK_MAIN,
+                                ObCharsetType::CHARSET_UTF8MB4,
+                                ObCollationType::CS_TYPE_UTF8MB4_BIN);
+
+    ObFTDictDesc quan_dict_desc("quan_dict",
+                                ObFTDictType::DICT_IK_QUAN,
+                                ObCharsetType::CHARSET_UTF8MB4,
+                                ObCollationType::CS_TYPE_UTF8MB4_BIN);
+
+    ObFTDictDesc stopword_dict_desc("stopword",
+                                    ObFTDictType::DICT_IK_STOP,
+                                    ObCharsetType::CHARSET_UTF8MB4,
+                                    ObCollationType::CS_TYPE_UTF8MB4_BIN);
+
+    if (should_read_newest_table()) {
+      // clear dict cache, always false now
+    } else {
+      if (OB_FAIL(init_single_dict(main_dict_desc, cache_main_))) {
+      } else if (OB_FAIL(init_single_dict(quan_dict_desc, cache_quan_))) {
+      } else if (OB_FAIL(init_single_dict(stopword_dict_desc, cache_stop_))) {
+      }
+    }
+
+    if (OB_FAIL(ret)) {
+      // already logged.
+    } else if (OB_FAIL(build_dict_from_cache(main_dict_desc, cache_main_, dict_main_))) {
+    } else if (OB_FAIL(build_dict_from_cache(quan_dict_desc, cache_quan_, dict_quan_))) {
+    } else if (OB_FAIL(build_dict_from_cache(stopword_dict_desc, cache_stop_, dict_stop_))) {
+    }
   }
 
   return ret;
@@ -366,17 +517,25 @@ void ObIKFTParser::reset()
   cache_quan_.reset();
   cache_stop_.reset();
 
-  if (!OB_ISNULL(dict_main_)) {
-    dict_main_->~ObIFTDict();
-    allocator_.free(dict_main_);
-  }
-  if (!OB_ISNULL(dict_quan_)) {
-    dict_quan_->~ObIFTDict();
-    allocator_.free(dict_quan_);
-  }
-  if (!OB_ISNULL(dict_stop_)) {
-    dict_stop_->~ObIFTDict();
-    allocator_.free(dict_stop_);
+  if (dict_shared_) {
+    // Owned by ObIKSharedDicts, just drop the references.
+    dict_main_ = nullptr;
+    dict_quan_ = nullptr;
+    dict_stop_ = nullptr;
+    dict_shared_ = false;
+  } else {
+    if (!OB_ISNULL(dict_main_)) {
+      dict_main_->~ObIFTDict();
+      allocator_.free(dict_main_);
+    }
+    if (!OB_ISNULL(dict_quan_)) {
+      dict_quan_->~ObIFTDict();
+      allocator_.free(dict_quan_);
+    }
+    if (!OB_ISNULL(dict_stop_)) {
+      dict_stop_->~ObIFTDict();
+      allocator_.free(dict_stop_);
+    }
   }
 
   is_inited_ = false;
