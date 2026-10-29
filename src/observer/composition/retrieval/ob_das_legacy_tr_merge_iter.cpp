@@ -381,7 +381,19 @@ int ObDASLegacyTRMergeIter::create_sparse_retrieval_iter()
   sr_iter_param_.id_proj_expr_ = ir_ctdef_->inv_scan_domain_id_col_;
   sr_iter_param_.relevance_expr_ = ir_ctdef_->relevance_expr_;
   sr_iter_param_.relevance_proj_expr_ = ir_ctdef_->relevance_proj_col_;
-  sr_iter_param_.filter_expr_ = ir_ctdef_->match_filter_;
+  // [P1] Existence-only retrieval: when the query does not consume the BM25 score, the
+  // pushed down MATCH filter is provably a bare boolean test on that score (the
+  // pure_bool_usage check in ObLogPlan::prepare_text_retrieval_scan keeps need_calc_relevance
+  // false only for that shape).  With need_calc_relevance() false every dimension iterator
+  // reports a constant score of 1.0 (ObTextRetrievalDaaTTokenIter::get_curr_score), and both
+  // field_boost_ and the per-token weights are validated to be strictly positive below, so
+  // every document released by the relevance collector already satisfies "score > 0".
+  // Dropping the filter expr on that path removes a per-row expression evaluation whose
+  // outcome is constant, and leaves the emitted row set byte for byte unchanged.
+  const bool existence_only_retrieval = !ir_ctdef_->need_calc_relevance()
+      && daat_mode_ && !topk_mode_ && !function_lookup_mode_
+      && ObMatchAgainstMode::NATURAL_LANGUAGE_MODE == ir_ctdef_->mode_flag_;
+  sr_iter_param_.filter_expr_ = existence_only_retrieval ? nullptr : ir_ctdef_->match_filter_;
   sr_iter_param_.topk_limit_ = topk_limit_;
   if (OB_NOT_NULL(ir_ctdef_->field_boost_expr_)) {
     ObDatum *boost_datum = nullptr;
