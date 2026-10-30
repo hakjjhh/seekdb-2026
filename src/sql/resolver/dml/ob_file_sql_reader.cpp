@@ -30,6 +30,7 @@
 #include "share/ob_errno.h"
 #include "lib/utility/utility.h"
 #include "common/timezone/ob_time_convert.h"
+#include "sql/engine/file_source/file_parquet_reader.h"
 
 namespace oceanbase
 {
@@ -2026,146 +2027,72 @@ int pq_decode_column(common::ObIAllocator &alloc,
 int ObFileSqlReader::read_parquet(const ObFileSqlOptions &opts, ObFileSqlTableData &table)
 {
   int ret = OB_SUCCESS;
-  char *file_buf = NULL;
-  int64_t file_len = 0;
-  if (OB_FAIL(read_whole_file(table.alloc_, opts.path_, file_buf, file_len))) {
-    LOG_WARN("failed to read parquet file", K(ret), K(opts.path_));
-  } else if (OB_UNLIKELY(file_len < 12)) {
+  file_source::FileParquetReader reader;
+  file_source::FileReadOptions read_options;
+  file_source::FileSchema schema;
+  file_source::FileSourceError error;
+  const std::string path(opts.path_.ptr(), static_cast<size_t>(opts.path_.length()));
+  read_options.format = file_source::FileFormat::PARQUET;
+  if (OB_UNLIKELY(opts.path_.empty())) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (!(error = reader.open(path, read_options)).is_ok()) {
+    ret = OB_FILE_NOT_EXIST;
+    LOG_WARN("failed to open parquet file", K(ret), K(opts.path_), "error", error.to_string().c_str());
+  } else if (!(error = reader.infer_schema(schema)).is_ok()) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("parquet file is too small", K(file_len), K(ret));
+    LOG_WARN("failed to infer parquet schema", K(ret), K(opts.path_), "error", error.to_string().c_str());
+  } else if (OB_UNLIKELY(schema.columns.empty())) {
+    ret = OB_ERR_UNEXPECTED;
   } else {
-    int32_t meta_len = 0;
-    MEMCPY(&meta_len, file_buf + file_len - 8, 4);
-    const bool magic_ok = (0 == ::memcmp(file_buf, "PAR1", 4))
-                          && (0 == ::memcmp(file_buf + file_len - 4, "PAR1", 4));
-    if (OB_UNLIKELY(!magic_ok) || OB_UNLIKELY(meta_len <= 0)
-        || OB_UNLIKELY(meta_len > file_len - 8)) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("invalid parquet footer", K(meta_len), K(file_len), K(ret));
-    } else {
-      const int64_t meta_offset = file_len - 8 - meta_len;
-      ObPqBuf buf(file_buf + meta_offset, meta_len);
-      common::ObSEArray<ObPqSchemaElem, 16> schema;
-      common::ObSEArray<ObPqRowGroup, 4> groups;
-      int64_t num_rows = 0;
-      int32_t last_id = 0;
-      bool stop = false;
-      while (OB_SUCC(ret) && !stop) {
-        ObPqField field;
-        if (OB_FAIL(pq_read_field_header(buf, last_id, field, stop))) {
-        } else if (stop) {
-        } else if (2 == field.id_) {
-          int64_t n = 0;
-          int32_t elem_type = 0;
-          if (OB_FAIL(pq_read_list_header(buf, n, elem_type))) {
-          }
-          for (int64_t i = 0; OB_SUCC(ret) && i < n; ++i) {
-            ObPqSchemaElem elem;
-            if (OB_FAIL(pq_parse_schema_elem(buf, elem))) {
-            } else if (OB_FAIL(schema.push_back(elem))) {
-            }
-          }
-        } else if (3 == field.id_) {
-          ret = pq_read_i64(buf, num_rows);
-        } else if (4 == field.id_) {
-          int64_t n = 0;
-          int32_t elem_type = 0;
-          if (OB_FAIL(pq_read_list_header(buf, n, elem_type))) {
-          }
-          for (int64_t i = 0; OB_SUCC(ret) && i < n; ++i) {
-            ObPqRowGroup group;
-            if (OB_FAIL(pq_parse_row_group(buf, group))) {
-            } else if (OB_FAIL(groups.push_back(group))) {
-            }
-          }
-        } else if (OB_FAIL(pq_skip_value(buf, field.type_))) {
-        }
+    ObFileSqlRawData raw;
+    for (int64_t j = 0; OB_SUCC(ret) && j < static_cast<int64_t>(schema.columns.size()); ++j) {
+      const std::string &name = schema.columns[static_cast<size_t>(j)].name;
+      common::ObString column_name(static_cast<int32_t>(name.size()), const_cast<char *>(name.data()));
+      if (OB_FAIL(raw.add_name(column_name))) {
       }
-      // the first schema element is the root, the remaining ones are the
-      // leaves of the (flat) schema
-      const int64_t col_cnt = schema.count() - 1;
-      if (OB_SUCC(ret) && OB_UNLIKELY(col_cnt <= 0 || col_cnt > 512)) {
+    }
+    file_source::FileRow row;
+    bool has_row = false;
+    while (OB_SUCC(ret) && (has_row = reader.next_row(row, error))) {
+      if (OB_UNLIKELY(row.values.size() != schema.columns.size()
+                      || row.nulls.size() != schema.columns.size())) {
         ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("unsupported parquet schema", K(col_cnt), K(ret));
+        LOG_WARN("parquet row shape mismatch", K(ret), K(row.values.size()),
+                 K(row.nulls.size()), K(schema.columns.size()));
       }
-      int64_t total_rows = 0;
-      for (int64_t g = 0; OB_SUCC(ret) && g < groups.count(); ++g) {
-        total_rows += groups.at(g).num_rows_;
-      }
-      if (OB_SUCC(ret) && (0 == total_rows) && (0 != num_rows)) {
-        total_rows = num_rows;
-      }
-      if (OB_SUCC(ret) && OB_UNLIKELY(total_rows > 2000000)) {
-        ret = OB_SIZE_OVERFLOW;
-        LOG_WARN("parquet file has too many rows", K(total_rows), K(ret));
-      }
-      if (OB_SUCC(ret)) {
-        const int64_t cell_cnt = total_rows * col_cnt;
-        const char **ptr_mat = NULL;
-        int32_t *len_mat = NULL;
-        if (cell_cnt > 0) {
-          ptr_mat = static_cast<const char **>(table.alloc_.alloc(sizeof(const char *) * cell_cnt));
-          len_mat = static_cast<int32_t *>(table.alloc_.alloc(sizeof(int32_t) * cell_cnt));
-        }
-        if (OB_UNLIKELY(cell_cnt > 0 && (NULL == ptr_mat || NULL == len_mat))) {
-          ret = OB_ALLOCATE_MEMORY_FAILED;
-        }
-        ObFileSqlRawData raw;
-        for (int64_t j = 0; OB_SUCC(ret) && j < col_cnt; ++j) {
-          const ObPqSchemaElem &elem = schema.at(j + 1);
-          if (OB_UNLIKELY(!elem.has_type_)) {
-            ret = OB_ERR_UNEXPECTED;
-            LOG_WARN("parquet column without type", K(j), K(ret));
-          } else if (OB_FAIL(raw.add_name(elem.name_))) {
+      for (int64_t j = 0; OB_SUCC(ret) && j < static_cast<int64_t>(row.values.size()); ++j) {
+        if (row.nulls[static_cast<size_t>(j)]) {
+          if (OB_FAIL(raw.add_cell(NULL, 0))) {
           }
-          const int32_t max_def_level = (PQ_REP_OPTIONAL == elem.repetition_) ? 1 : 0;
-          int64_t row_base = 0;
-          for (int64_t g = 0; OB_SUCC(ret) && g < groups.count(); ++g) {
-            const ObPqRowGroup &group = groups.at(g);
-            if (OB_UNLIKELY(j >= group.chunks_.count())) {
-              ret = OB_ERR_UNEXPECTED;
-              LOG_WARN("parquet row group has too few columns", K(j),
-                       K(group.chunks_.count()), K(ret));
-            } else {
-              common::ObSEArray<const char *, 64> col_ptrs;
-              common::ObSEArray<int32_t, 64> col_lens;
-              if (OB_FAIL(pq_decode_column(table.alloc_, file_buf, file_len,
-                                           group.chunks_.at(j).meta_, max_def_level,
-                                           0, elem.converted_, col_ptrs, col_lens))) {
-              } else if (OB_UNLIKELY(static_cast<int64_t>(col_ptrs.count()) != group.num_rows_)) {
-                ret = OB_ERR_UNEXPECTED;
-                LOG_WARN("decoded parquet column size mismatch", K(j), K(g),
-                         K(col_ptrs.count()), K(group.num_rows_), K(ret));
-              } else {
-                for (int64_t i = 0; i < group.num_rows_; ++i) {
-                  ptr_mat[(row_base + i) * col_cnt + j] = col_ptrs.at(i);
-                  len_mat[(row_base + i) * col_cnt + j] = col_lens.at(i);
-                }
-              }
+        } else {
+          const std::string &value = row.values[static_cast<size_t>(j)];
+          const int32_t len = static_cast<int32_t>(value.size());
+          char *copy = static_cast<char *>(table.alloc_.alloc(len > 0 ? len : 1));
+          if (OB_ISNULL(copy)) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+          } else {
+            if (len > 0) {
+              MEMCPY(copy, value.data(), len);
             }
-            row_base += group.num_rows_;
-          }
-        }
-        for (int64_t i = 0; OB_SUCC(ret) && i < total_rows; ++i) {
-          for (int64_t j = 0; OB_SUCC(ret) && j < col_cnt; ++j) {
-            const int64_t idx = i * col_cnt + j;
-            if (OB_FAIL(raw.add_cell(ptr_mat[idx], len_mat[idx]))) {
+            if (OB_FAIL(raw.add_cell(copy, len))) {
             }
           }
         }
-        if (OB_SUCC(ret)) {
-          raw.col_cnt_ = col_cnt;
-          raw.row_cnt_ = total_rows;
-          if (OB_FAIL(materialize(table.alloc_, raw, table))) {
-            LOG_WARN("failed to materialize parquet data", K(ret));
-          }
-        }
+      }
+    }
+    if (OB_SUCC(ret) && !error.is_ok()) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("failed to read parquet rows", K(ret), K(opts.path_), "error", error.to_string().c_str());
+    }
+    if (OB_SUCC(ret)) {
+      raw.col_cnt_ = static_cast<int64_t>(schema.columns.size());
+      raw.row_cnt_ = raw.col_cnt_ > 0 ? raw.cells_.count() / raw.col_cnt_ : 0;
+      if (OB_FAIL(materialize(table.alloc_, raw, table))) {
       }
     }
   }
   return ret;
 }
-
 int ObFileSqlReader::read_table(const ObFileSqlFuncKind kind,
                                 const ObFileSqlOptions &opts,
                                 ObFileSqlTableData &table)
