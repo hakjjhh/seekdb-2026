@@ -64,7 +64,7 @@ bool has_wildcard(const std::string &text)
 }
 
 /// Case insensitive comparison against a lower case literal.
-bool equals_ignore_case(const std::string &text, const char *literal)
+bool path_equals_ignore_case(const std::string &text, const char *literal)
 {
   const size_t len = ::strlen(literal);
   if (text.size() != len) {
@@ -272,7 +272,7 @@ bool absolute_path(const std::string &path, std::string &result)
 
 bool check_secure_path(const std::string &secure_file_priv, const std::string &path, std::string &error)
 {
-  if (secure_file_priv.empty() || equals_ignore_case(secure_file_priv, kNullFilePriv)) {
+  if (secure_file_priv.empty() || path_equals_ignore_case(secure_file_priv, kNullFilePriv)) {
     error = "Access denied, please set suitable variable 'secure_file_priv' first";
     return false;
   }

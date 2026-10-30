@@ -32,38 +32,38 @@ namespace {
 const char *const kParquetMagic = "PAR1";
 
 // thrift compact protocol field types
-const int8_t kTypeBooleanTrue = 1;
+const int8_t kReaderTypeBooleanTrue = 1;
 
 // parquet physical types
-const int32_t kTypeBoolean = 0;
-const int32_t kTypeInt32 = 1;
-const int32_t kTypeInt64 = 2;
-const int32_t kTypeInt96 = 3;
-const int32_t kTypeFloat = 4;
-const int32_t kTypeDouble = 5;
-const int32_t kTypeByteArray = 6;
-const int32_t kTypeFixedLenByteArray = 7;
+const int32_t kReaderTypeBoolean = 0;
+const int32_t kReaderTypeInt32 = 1;
+const int32_t kReaderTypeInt64 = 2;
+const int32_t kReaderTypeInt96 = 3;
+const int32_t kReaderTypeFloat = 4;
+const int32_t kReaderTypeDouble = 5;
+const int32_t kReaderTypeByteArray = 6;
+const int32_t kReaderTypeFixedLenByteArray = 7;
 
 // parquet page types
-const int32_t kPageTypeData = 0;
-const int32_t kPageTypeIndex = 1;
-const int32_t kPageTypeDictionary = 2;
-const int32_t kPageTypeDataV2 = 3;
+const int32_t kReaderPageTypeData = 0;
+const int32_t kReaderPageTypeIndex = 1;
+const int32_t kReaderPageTypeDictionary = 2;
+const int32_t kReaderPageTypeDataV2 = 3;
 
 // parquet encodings
-const int32_t kEncodingPlain = 0;
-const int32_t kEncodingPlainDictionary = 2;
-const int32_t kEncodingRle = 3;
-const int32_t kEncodingRleDictionary = 8;
+const int32_t kReaderEncodingPlain = 0;
+const int32_t kReaderEncodingPlainDictionary = 2;
+const int32_t kReaderEncodingRle = 3;
+const int32_t kReaderEncodingRleDictionary = 8;
 
 // converted types
-const int32_t kConvertedDate = 6;
-const int32_t kConvertedTimestampMillis = 9;
-const int32_t kConvertedTimestampMicros = 10;
+const int32_t kReaderConvertedDate = 6;
+const int32_t kReaderConvertedTimestampMillis = 9;
+const int32_t kReaderConvertedTimestampMicros = 10;
 
 // logical type kinds
-const int32_t kLogicalDate = 6;
-const int32_t kLogicalTimestamp = 8;
+const int32_t kReaderLogicalDate = 6;
+const int32_t kReaderLogicalTimestamp = 8;
 
 int32_t bit_width(int64_t max_value)
 {
@@ -576,7 +576,7 @@ bool read_page_header(ThriftCompactReader &reader, PageHeaderInfo &header)
             }
             case 7: {
               // a boolean is encoded in the type of the field header
-              header.is_compressed = (kTypeBooleanTrue == page_type);
+              header.is_compressed = (kReaderTypeBooleanTrue == page_type);
               break;
             }
             default: {
@@ -690,7 +690,7 @@ bool decode_data_page(const unsigned char *page,
     }
   }
   const bool dictionary_encoded =
-      (kEncodingPlainDictionary == header.encoding || kEncodingRleDictionary == header.encoding);
+      (kReaderEncodingPlainDictionary == header.encoding || kReaderEncodingRleDictionary == header.encoding);
   std::vector<std::string> decoded;
   if (dictionary_encoded) {
     if (dictionary.empty()) {
@@ -730,7 +730,7 @@ bool decode_data_page(const unsigned char *page,
       }
       decoded.push_back(dictionary[static_cast<size_t>(index)]);
     }
-  } else if (kEncodingPlain == header.encoding) {
+  } else if (kReaderEncodingPlain == header.encoding) {
     if (!decode_plain_values(page + payload_pos,
                               payload_size,
                               column.type,
@@ -914,25 +914,25 @@ FileSourceError FileParquetReader::infer_schema(FileSchema &schema)
     file_column.name = column.name;
     file_column.nullable = (static_cast<int32_t>(ParquetRepetition::OPTIONAL) == column.repetition_type);
     switch (column.type) {
-      case kTypeBoolean: file_column.type = ColumnType::BOOLEAN; break;
-      case kTypeInt32: {
-        file_column.type = (kConvertedDate == column.converted_type || kLogicalDate == column.logical_type_kind)
+      case kReaderTypeBoolean: file_column.type = ColumnType::BOOLEAN; break;
+      case kReaderTypeInt32: {
+        file_column.type = (kReaderConvertedDate == column.converted_type || kReaderLogicalDate == column.logical_type_kind)
                                ? ColumnType::DATE
                                : ColumnType::BIGINT;
         break;
       }
-      case kTypeInt64: {
-        file_column.type = (kConvertedTimestampMillis == column.converted_type
-                            || kConvertedTimestampMicros == column.converted_type
-                            || kLogicalTimestamp == column.logical_type_kind)
+      case kReaderTypeInt64: {
+        file_column.type = (kReaderConvertedTimestampMillis == column.converted_type
+                            || kReaderConvertedTimestampMicros == column.converted_type
+                            || kReaderLogicalTimestamp == column.logical_type_kind)
                                ? ColumnType::DATETIME
                                : ColumnType::BIGINT;
         break;
       }
-      case kTypeFloat:
-      case kTypeDouble: file_column.type = ColumnType::DOUBLE; break;
-      case kTypeByteArray:
-      case kTypeFixedLenByteArray: file_column.type = ColumnType::VARCHAR; break;
+      case kReaderTypeFloat:
+      case kReaderTypeDouble: file_column.type = ColumnType::DOUBLE; break;
+      case kReaderTypeByteArray:
+      case kReaderTypeFixedLenByteArray: file_column.type = ColumnType::VARCHAR; break;
       default: file_column.type = ColumnType::VARCHAR; break;
     }
     schema.columns.push_back(file_column);
@@ -995,7 +995,7 @@ FileSourceError FileParquetReader::decode_row_group(int64_t row_group_index,
       std::vector<unsigned char> page(buffer.begin() + static_cast<long>(pos),
                                       buffer.begin() + static_cast<long>(pos + header.compressed_page_size));
       pos += static_cast<size_t>(header.compressed_page_size);
-      if (kPageTypeDictionary == header.page_type) {
+      if (kReaderPageTypeDictionary == header.page_type) {
         // the dictionary page holds the plain encoded dictionary values
         std::vector<unsigned char> plain;
         if (static_cast<int32_t>(ParquetCodec::SNAPPY) == chunk.codec) {
@@ -1016,11 +1016,11 @@ FileSourceError FileParquetReader::decode_row_group(int64_t row_group_index,
         }
         continue;
       }
-      if (kPageTypeData != header.page_type && kPageTypeDataV2 != header.page_type) {
+      if (kReaderPageTypeData != header.page_type && kReaderPageTypeDataV2 != header.page_type) {
         // index pages and unknown pages are ignored
         continue;
       }
-      const bool is_v2 = (kPageTypeDataV2 == header.page_type);
+      const bool is_v2 = (kReaderPageTypeDataV2 == header.page_type);
       std::vector<unsigned char> payload;
       if (is_v2) {
         const size_t levels_size = static_cast<size_t>(header.repetition_levels_byte_length)
