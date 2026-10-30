@@ -145,6 +145,12 @@ public:
 private:
   int save_relevances_and_docids();
   int save_docids();
+public:
+  // Hand out the unconsumed suffix of the currently loaded ID batch. These IDs
+  // stay owned by this iterator, so the caller must finish them before the next
+  // child read; this is what lets the presence-union path avoid copying them.
+  int get_next_doc_id_batch(const ObDocIdExt *&ids, int64_t &count);
+private:
   ObArenaAllocator *allocator_;
   ObTextRetrievalTokenIter *token_iter_;
   sql::ObEvalCtx *eval_ctx_;

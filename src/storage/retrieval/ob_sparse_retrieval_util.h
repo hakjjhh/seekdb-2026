@@ -25,6 +25,31 @@ namespace oceanbase
 namespace storage
 {
 
+// Encoded document IDs use the binary collation: compare all bytes, including
+// trailing spaces. No character-set lookup or Unicode decoding is required.
+OB_INLINE int compare_binary_retrieval_id(const ObDatum &lhs, const ObDatum &rhs,
+                                          int &cmp_ret,
+                                          const common::ObDatumAccessContext *ctx)
+{
+  if (OB_UNLIKELY(lhs.is_ext() || rhs.is_ext())) {
+    return ObDatumFuncs::get_basic_func(common::ObVarcharType, common::CS_TYPE_BINARY)
+        ->null_first_cmp_(lhs, rhs, cmp_ret, ctx);
+  } else if (OB_UNLIKELY(lhs.is_null() || rhs.is_null())) {
+    cmp_ret = static_cast<int>(rhs.is_null()) - static_cast<int>(lhs.is_null());
+  } else if (lhs.ptr_ == rhs.ptr_ && lhs.len_ == rhs.len_) {
+    cmp_ret = 0;
+  } else if (lhs.len_ == sizeof(uint64_t) && rhs.len_ == sizeof(uint64_t)) {
+    cmp_ret = MEMCMP(lhs.ptr_, rhs.ptr_, sizeof(uint64_t));
+  } else if (lhs.len_ == 2 * sizeof(uint64_t) && rhs.len_ == 2 * sizeof(uint64_t)) {
+    cmp_ret = MEMCMP(lhs.ptr_, rhs.ptr_, 2 * sizeof(uint64_t));
+  } else {
+    const int64_t length = MIN(lhs.len_, rhs.len_);
+    const int cmp = length == 0 ? 0 : MEMCMP(lhs.ptr_, rhs.ptr_, length);
+    cmp_ret = cmp != 0 ? cmp : (lhs.len_ < rhs.len_ ? -1 : lhs.len_ > rhs.len_ ? 1 : 0);
+  }
+  return OB_SUCCESS;
+}
+
 class ObDomainIdCmp
 {
 public:
