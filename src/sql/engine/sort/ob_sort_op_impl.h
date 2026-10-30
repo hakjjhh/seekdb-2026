@@ -481,6 +481,23 @@ public:
     int64_t cmp_start_;
     int64_t cmp_end_;
   private:
+    // Per-sort-column cache.  The comparison loop used to walk
+    // sort_collations_->at(i) and sort_cmp_funs_->at(i) on every single
+    // comparison, i.e. two indirect array lookups per column per comparison.
+    // For a multi-column sort this dominated the sort cost.  The cached
+    // entries hold exactly the same values, they are only fetched once.
+    struct SortColCache
+    {
+      uint32_t field_idx_;
+      bool is_ascending_;
+      common::ObDatumCmpFuncType cmp_func_;
+    };
+    // A plain fixed-size array: no allocator needed, no allocation on the hot
+    // path.  When a sort has more columns than this the cache is simply not
+    // used and the comparison falls back to the original indirect lookups.
+    static const int64_t MAX_CACHED_SORT_COLS = 16;
+    SortColCache col_caches_[MAX_CACHED_SORT_COLS];
+    bool cache_valid_;
     int64_t cnt_;
     DISALLOW_COPY_AND_ASSIGN(Compare);
   };
