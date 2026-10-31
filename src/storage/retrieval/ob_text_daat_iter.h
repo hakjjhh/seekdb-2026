@@ -69,11 +69,6 @@ protected:
   // IDs, so they bypass the generic merge heap / relevance / projection path
   // and merge the children's ID batches directly.
   int get_presence_union_rows(const int64_t capacity, int64_t &count);
-  // The official workload unions two or three dimensions. Fixing the dimension
-  // count as a template argument lets the head scan unroll and keeps the child
-  // batch handles in registers; DIMS == 0 keeps the runtime-bound generic loop.
-  template <int64_t DIMS>
-  int presence_union_rows_impl(const int64_t capacity, int64_t &count);
   void project_presence_results(const int64_t count);
 protected:
   static constexpr int64_t SHORT_UNION_MAX_DIMS = 8;
