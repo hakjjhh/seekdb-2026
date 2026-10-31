@@ -109,13 +109,25 @@ int ObTextDaaTIter::get_next_rows(const int64_t capacity, int64_t &count)
 
 int ObTextDaaTIter::get_presence_union_rows(const int64_t capacity, int64_t &count)
 {
+  const int64_t dim_count = dim_iters_->count();
+  if (2 == dim_count) {
+    return presence_union_rows_impl<2>(capacity, count);
+  } else if (3 == dim_count) {
+    return presence_union_rows_impl<3>(capacity, count);
+  }
+  return presence_union_rows_impl<0>(capacity, count);
+}
+
+template <int64_t DIMS>
+int ObTextDaaTIter::presence_union_rows_impl(const int64_t capacity, int64_t &count)
+{
   int ret = OB_SUCCESS;
   count = 0;
-  const int64_t dim_count = dim_iters_->count();
+  const int64_t dim_count = DIMS > 0 ? DIMS : dim_iters_->count();
   const int64_t real_capacity = MIN(capacity, iter_param_->max_batch_size_);
   const common::ObLimitParam &limit = *iter_param_->limit_param_;
   const bool integer_id = iter_param_->id_proj_expr_->datum_meta_.type_ == common::ObUInt64Type;
-  int64_t equal_heads[SHORT_UNION_MAX_DIMS];
+  int64_t equal_heads[DIMS > 0 ? DIMS : SHORT_UNION_MAX_DIMS];
   ObDatum *output_ids = iter_param_->id_proj_expr_->locate_batch_datums(*iter_param_->eval_ctx_);
   bool batch_boundary = false;
   bool scan_datums_restored = false;
