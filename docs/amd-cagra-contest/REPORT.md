@@ -27,11 +27,14 @@
 | `build_algo` | `NN_DESCENT` | `NN_DESCENT` | 不变 |
 | `graph_degree` | 128 | 128 | 不变，保住最终图质量 |
 | `intermediate_graph_degree` | 256 | 256 | 不变 |
-| `nn_descent_niter` | 100 | **20** | cuVS 默认迭代次数 |
+| `nn_descent_niter` | 100 | 100 | 保持基线迭代次数 |
 
-NN-descent 迭代是 CAGRA 建图的主要耗时项。基线把迭代次数设为 cuVS 默认值
-（20）的 5 倍，在 250K 规模数据集上远超收敛所需；参赛版本恢复到默认迭代
-次数，同时保持最终图度数不变，避免召回率下降。
+实测结论：迭代次数是本题的主要耗时项，但它同时决定 CAGRA 图质量。把
+`nn_descent_niter` 降到 20 会让 hidden250k 的 Recall@10/@100 相对同轮基线
+下降超过 0.005，触发 `recall@10_baseline_delta`/`recall@100_baseline_delta`
+两条硬门槛，总分归零。因此参赛版本保持基线的 100 次迭代，把优化放在不影响
+图结构的持久化链路上：快照读写 CAGRA 图分块从 64 KiB 提升到 8 MiB，
+减少建索引与首条查询加载快照时的系统调用与拷贝次数。
 
 ## 3. 可复现的测试方法
 
