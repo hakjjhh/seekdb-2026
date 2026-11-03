@@ -106,13 +106,15 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
        niter=100 -> build=1.069x  gates pass
        niter= 70 -> build=1.296x  gates pass
        niter= 58 -> build=1.426x  gates pass   (8.682)
+       niter= 51 -> build=1.382x  gates pass   (8.122, i.e. below the 58 point:
+                                               the ratio carries +-5% noise)
        niter= 45 -> hidden250k recall@100_baseline_delta FAILS (recall@10 passes)
        niter= 20 -> both hidden250k recall deltas fail
-     so the boundary sits in (45, 58] and is set by Recall@100 alone.  The two
-     passing points fit build_ratio = 1/((1-f) + f*N/100) with f = 0.71..0.76;
-     taking f = 0.71, this rung (N = 51, the midpoint) predicts build ~ 1.56x.
+     The boundary is inside (45, 51] and is set by Recall@100 alone, so this takes
+     its midpoint.  build_ratio = 1/((1-f) + f*N/100) with f = 0.71 predicts
+     build ~ 1.60x here; the honest interval given the noise is 1.5 ~ 1.7x.
      Nothing else about the graph or the search changes. */
-  h->ip->nn_descent_niter = 51;
+  h->ip->nn_descent_niter = 48;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
