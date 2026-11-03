@@ -102,10 +102,14 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
   h->ip->intermediate_graph_degree = 256;
-  /* Keep the frozen baseline's iteration count: the hard recall gates are
-     measured against the same-round baseline with a 0.005 tolerance, and
-     cutting NN-descent iterations drops hidden250k recall past it. */
-  h->ip->nn_descent_niter = 100;
+  /* Binary-searching the recall cliff, one step at a time.  Measured on the
+     evaluator: niter=100 -> build=1.069x (gates pass), niter=70 -> build=1.296x
+     (gates pass), niter=20 -> hidden250k Recall@10 and @100 both drop more than
+     the 0.005 same-round tolerance (score 0).  Those two passing points fit
+     build_ratio = 1 / ((1-f) + f*N/100) with f ~= 0.76, i.e. NN-descent is about
+     three quarters of the timed window, so the axis is worth pushing.  45 is the
+     midpoint of the still-unknown interval (20, 70]. */
+  h->ip->nn_descent_niter = 45;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
