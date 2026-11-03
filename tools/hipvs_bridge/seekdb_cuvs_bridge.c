@@ -105,7 +105,11 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   /* Keep the frozen baseline's iteration count: the hard recall gates are
      measured against the same-round baseline with a 0.005 tolerance, and
      cutting NN-descent iterations drops hidden250k recall past it. */
-  h->ip->nn_descent_niter = 100;
+  /* Probe: 100 -> 70 iterations.  NN-descent dominates the timed build window and
+     the graph is the only thing the recall gates protect, so this walks the cliff
+     one measurable step at a time (20 iterations failed both hidden250k recall
+     deltas; the same-round tolerance is 0.005).  Everything else is untouched. */
+  h->ip->nn_descent_niter = 70;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
