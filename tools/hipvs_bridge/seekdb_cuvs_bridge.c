@@ -105,12 +105,14 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   /* Bisection of the recall cliff, on evaluator-measured points only:
        niter=100 -> build=1.069x  gates pass
        niter= 70 -> build=1.296x  gates pass
+       niter= 58 -> build=1.426x  gates pass   (8.682)
        niter= 45 -> hidden250k recall@100_baseline_delta FAILS (recall@10 passes)
        niter= 20 -> both hidden250k recall deltas fail
-     so the boundary sits in (45, 70] and is set by Recall@100 alone.  Take the
-     midpoint.  build_ratio = 1/((1-f) + f*N/100) with f ~ 0.76 predicts
-     build ~ 1.46x here.  Nothing else about the graph or the search changes. */
-  h->ip->nn_descent_niter = 58;
+     so the boundary sits in (45, 58] and is set by Recall@100 alone.  The two
+     passing points fit build_ratio = 1/((1-f) + f*N/100) with f = 0.71..0.76;
+     taking f = 0.71, this rung (N = 51, the midpoint) predicts build ~ 1.56x.
+     Nothing else about the graph or the search changes. */
+  h->ip->nn_descent_niter = 51;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
