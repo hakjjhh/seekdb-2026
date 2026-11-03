@@ -32,7 +32,12 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   dset.dl_tensor.shape = ds; dset.dl_tensor.strides = 0; dset.dl_tensor.byte_offset = 0;
 
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
-  h->ip->build_algo = NN_DESCENT;
+  /* Build the intermediate k-NN graph with hipVS' IVF-PQ instead of NN-descent.
+     The frozen baseline pays for 100 NN-descent iterations; IVF-PQ derives its
+     clustering/search defaults from the dataset shape and produces the same
+     256-wide intermediate graph that is then pruned to graph_degree=128.
+     nn_descent_niter is ignored on this path and left at the baseline value. */
+  h->ip->build_algo = IVF_PQ;
   h->ip->graph_degree = 128;
   h->ip->intermediate_graph_degree = 256;
   /* Keep the frozen baseline's iteration count: the hard recall gates are

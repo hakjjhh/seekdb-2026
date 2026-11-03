@@ -24,10 +24,14 @@
 
 | 参数 | 基线 | 参赛版本 | 说明 |
 |---|---|---|---|
-| `build_algo` | `NN_DESCENT` | `NN_DESCENT` | 不变 |
+| `build_algo` | `NN_DESCENT` | **`IVF_PQ`** | 改用 IVF-PQ 生成中间 k-NN 图 |
 | `graph_degree` | 128 | 128 | 不变，保住最终图质量 |
 | `intermediate_graph_degree` | 256 | 256 | 不变 |
 | `nn_descent_niter` | 100 | 100 | 保持基线迭代次数 |
+
+本次实验：中间 k-NN 图改由 hipVS 的 IVF-PQ 生成（`build_algo=IVF_PQ`），其余图参数与基线一致，检索仍走组织方固定版本的 CAGRA 搜索实现。
+hipVS 的 `cuvsCagraIndexParamsCreate` 已经为该结构分配了默认的 `graph_build_params`，因此沿用 IVF-PQ 按数据集形状自动推导的聚类/探测默认值，
+不额外指定 n_lists/pq_bits，避免过拟合特定数据。
 
 实测结论：迭代次数是本题的主要耗时项，但它同时决定 CAGRA 图质量。把
 `nn_descent_niter` 降到 20 会让 hidden250k 的 Recall@10/@100 相对同轮基线
