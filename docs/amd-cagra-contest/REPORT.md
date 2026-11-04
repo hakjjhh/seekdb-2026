@@ -144,3 +144,68 @@ QPS 约 147/143 与 87/85；而 V1~V4 在同一离线 DDL 路径上实际构建�
 
 搜索参数、图结构与检索实现都未改动，因此返回结果与基线逐条一致；本项只作用于
 第七节的查询吞吐（2 分），同时因为计时终点包含第一条查询，也顺带进入构建窗口。
+
+## 7. 内部改用 FP16 存储与检索（本次实验）
+
+### 7.1 先用基线数据定位查询耗时到底花在哪
+
+题面给出的冻结基线参考值（nq=4096 单行查询 QPS）可以直接反解每查询耗时结构。
+两个正式数据集只有维度和数据内容不同，SQL、索引参数、检索参数完全一致：
+
+| 数据集 | dim | QPS | 每条耗时 |
+| --- | ---: | ---: | ---: |
+| SIFT250K | 128 | 147 | 6.80 ms |
+| Hidden250K | 256 | 87 | 11.49 ms |
+
+按 `每条耗时 = a + b·dim` 求解得 **a ≈ 2.1 ms、b·dim ≈ 9.4 ms**：与维度无关的固定开销
+（SQL 解析/计划、适配层分发、结果组装）只占约 18%，其余 82% 是随维度线性增长的
+**距离计算**。这个结论否掉了「去优化 seekdb 查询链路」的方向——把固定开销压到 0 也只能
+拿到 1.22x，够不到查询性能分所需的 1.5x。要压查询侧，只能让**每次距离计算本身更便宜**。
+
+顺带一个必须记录的观察：cuVS 的默认检索参数是 `itopk_size = 64`、`search_width = 1`，
+而比赛基线把它们抬到了 `512` 和 `4`，搜索工作量是库默认值的 8 倍。把它们调回去能立刻
+拿到远超 1.5x 的查询加速，但那是以降低 Recall 换取性能，题面第十一节明令禁止，
+本报告不采用该方向；下面的 FP16 方案不改动任何检索参数。
+
+### 7.2 做法
+
+题面 3.1 节明确允许「在内部使用 FP16、混合精度或其他数值优化」，只要求不改评测输入、
+不改对外 FP32 语义、并通过同样的 ID 正确性与 Recall 门槛。本实验把索引与查询整体改为
+binary16，图结构、`graph_degree`、`nn_descent_niter`、`itopk_size`、`search_width`
+一律不动——即用同样的搜索工作量换取一半的距离计算成本，而不是靠少搜来换速度：
+
+- 构建：host 侧把 FP32 数据集转成 binary16，以 `dtype.bits = 16` 的 DLTensor 交给
+  `cuvsCagraBuild`，得到 `index<half, uint32_t>`；
+- 查询：单行/批量查询先转 binary16 再上传，查询张量同样标 `bits = 16`
+  （`cuvsCagraSearch` 要求 `queries.dtype.code == index.dtype.code`）；
+- 对外语义不变：`cuvsCagraSearch` 自身就断言 `distances` 必须是 float32
+  （`RAFT_EXPECTS(distances.dtype.bits == 32, "distances should be of type float32")`），
+  返回的 ID 仍是 `uint32`，因此 FP32 契约由库强制保证，不依赖本仓库的自觉；
+- 快照链路无需改动：`cuvsCagraSerialize` 按 `index->dtype` 分派到 `_serialize<half>`，
+  `cuvsCagraDeserialize` 从文件头的 numpy descr 读回 dtype 并分派 `_deserialize<half>`，
+  重载后索引仍为 half，与查询侧发送的 binary16 张量一致。
+
+### 7.3 本地可验证的部分：转换函数的差分测试
+
+FP32→binary16 是本次唯一能在本机严格验证的部件，因此单独做了差分测试：把转换函数从
+bridge 源码里抽出来，与 **CPython 自带的独立半精度编码器**（`struct` 的 `'e'` 格式）逐值比对，
+共 4,000,000 个样本，覆盖
+
+- 全部 65536 个 binary16 位型放宽到 FP32 后再转回（往返闭合）；
+- 上溢边界 `0x47700000`~`0x47900000`（57344~720896，含 65536）**穷举**；
+- 半精度次正规区间与最小正规值边界（`0x33000000`、`0x38000000` 段）跨步扫描；
+- 130 万个覆盖整个 FP32 位空间的随机样本。
+
+结果 **0 失配**，2046 个 NaN 输入全部映射为半精度 NaN。该测试当场抓出并修掉了一个真实
+缺陷：初版用 `frac != 0` 判定 NaN，导致 `100000.0f`、`1e38f` 这类「有限但超出半精度范围」
+的值被编码成 `0x7E00`（NaN）而不是 `0x7C00`（inf）。修正后按 IEEE-754 的
+round-to-nearest-even 处理，上溢一律得 inf，只有输入本身是 inf/NaN 时才保留其性质。
+
+### 7.4 一处需要记录的 pinned hipVS 缺陷
+
+`cuvsCagraIndexGetSize` / `GetDims` / `GetGraphDegree` 无视 `index->dtype`，
+一律 `reinterpret_cast` 成 `index<float, uint32_t>*`。对 half 索引这在实践中仍然正确：
+`cagra::index` 的成员是 `metric_`、`graph_`（`device_matrix<uint32_t>`）、`graph_view_`、
+`dataset_`（`unique_ptr<dataset<IdxT>>`），**没有一个依赖 T**，因此两种实例化布局完全相同；
+`dim()` 读的是 `graph_view_.extent(1)`，`size()` 走的是 T 无关基类 `dataset<IdxT>` 的虚调用。
+记录此点是因为它依赖布局巧合而非接口契约，若 hipVS 改动 `index` 成员顺序即会失效。
