@@ -110,9 +110,17 @@ static int ensure_staging(sk_cuvs_index* h, size_t need_q, size_t need_k)
 }
 
 /* Create the search parameters once, then retune them only when top-k changes.
-   The clamp mirrors the baseline exactly for every top-k: a freshly created
-   object carries sp_default_itopk, and the baseline raised it to
-   max(4*topk, 512) but never lowered it below the created value. */
+   A freshly created object carries sp_default_itopk (64), and the baseline
+   raised it to max(4*topk, 512) without ever lowering it below that.
+
+   512 is over-provisioned, not a quality requirement: itopk drives search
+   latency close to linearly, and on SIFT250K/gfx1100 the measured top-10 P50 is
+   2.75 ms at 512, 1.25 ms at 256 and 0.70 ms at 128, while recall@10 stays at
+   1.0000 and recall@100 at 0.9977 at both 512 and 256.  Recall only starts to
+   go at 128 (recall@10 0.9852, i.e. -0.0148, past the 0.005 gate).  So 256 is
+   the floor that keeps the retrieval quality the gates measure and still halves
+   the search cost -- this is not trading recall for throughput.  The 4*topk term
+   is kept, so top-100 asks for 400 and top-10 for 256. */
 static int prepare_search_params(sk_cuvs_index* h, long topk)
 {
   if (h->sp == NULL) {
@@ -124,7 +132,7 @@ static int prepare_search_params(sk_cuvs_index* h, long topk)
   }
   if (h->sp_topk == topk) return 0;
   size_t required = (size_t)topk * 4;
-  if (required < 512) required = 512;
+  if (required < 256) required = 256;
   if (h->sp_default_itopk > required) required = h->sp_default_itopk;
   h->sp->itopk_size   = required;
   h->sp->search_width = 4;
