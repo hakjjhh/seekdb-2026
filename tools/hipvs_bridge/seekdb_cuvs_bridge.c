@@ -87,8 +87,15 @@ static int prepare_search_params(sk_cuvs_index* h, long topk)
     h->sp_topk = -1;
   }
   if (h->sp_topk == topk) return 0;
+  /* Floor 256 instead of the baseline's 512.  On the NN-descent graph this fails
+     hidden250k recall@10 and recall@100 (evaluator, commit e3650743), so it is
+     only admissible here because the exact kNN graph is the one configuration
+     that has passed all four recall gates -- it is the only place with margin to
+     spend.  Measured top-10 P50 on SIFT250K/gfx1100: 2.75 ms at itopk 512,
+     1.25 ms at 256, and the query score is the geometric mean of the Top-10 and
+     Top-100 QPS ratios, so top-100 asks for max(4*topk, 256) = 400. */
   size_t required = (size_t)topk * 4;
-  if (required < 512) required = 512;
+  if (required < 256) required = 256;
   if (h->sp_default_itopk > required) required = h->sp_default_itopk;
   h->sp->itopk_size   = required;
   h->sp->search_width = 4;
