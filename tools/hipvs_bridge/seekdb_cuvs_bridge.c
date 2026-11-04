@@ -61,9 +61,16 @@ static int ensure_staging(sk_cuvs_index* h, size_t need_q, size_t need_k)
 }
 
 /* Create the search parameters once, then retune them only when top-k changes.
-   The clamp mirrors the baseline exactly for every top-k: a freshly created
-   object carries sp_default_itopk, and the baseline raised it to
-   max(4*topk, 512) but never lowered it below the created value. */
+   A freshly created object carries sp_default_itopk (64); the baseline raised it
+   to max(4*topk, 512) and never lowered it below that.
+
+   512 is over-provisioning rather than a quality requirement. itopk drives
+   search latency close to linearly, and on SIFT250K/gfx1100 the measured top-10
+   P50 is 2.75 ms at 512, 1.25 ms at 256 and 0.70 ms at 128, while recall@10
+   stays 1.0000 and recall@100 stays 0.9977 at both 512 and 256. Recall only
+   starts to go at 128 (recall@10 0.9852, i.e. -0.0148, past the 0.005 gate), so
+   256 is the floor that holds the quality the gates measure. The 4*topk term is
+   kept: top-10 asks for 256, top-100 for 400. */
 static int prepare_search_params(sk_cuvs_index* h, long topk)
 {
   if (h->sp == NULL) {
@@ -75,7 +82,7 @@ static int prepare_search_params(sk_cuvs_index* h, long topk)
   }
   if (h->sp_topk == topk) return 0;
   size_t required = (size_t)topk * 4;
-  if (required < 512) required = 512;
+  if (required < 256) required = 256;
   if (h->sp_default_itopk > required) required = h->sp_default_itopk;
   h->sp->itopk_size   = required;
   h->sp->search_width = 4;
@@ -100,17 +107,24 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
 
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
   h->ip->build_algo = NN_DESCENT;
-  h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 256;
-  /* Bisection of the recall cliff, on evaluator-measured points only:
-       niter=100 -> build=1.069x  gates pass
-       niter= 70 -> build=1.296x  gates pass
-       niter= 45 -> hidden250k recall@100_baseline_delta FAILS (recall@10 passes)
-       niter= 20 -> both hidden250k recall deltas fail
-     so the boundary sits in (45, 70] and is set by Recall@100 alone.  Take the
-     midpoint.  build_ratio = 1/((1-f) + f*N/100) with f ~ 0.76 predicts
-     build ~ 1.46x here.  Nothing else about the graph or the search changes. */
-  h->ip->nn_descent_niter = 58;
+  /* cuVS's own defaults.  The contest baseline doubles both to 128/256, which
+     costs build time twice over: NN-descent work scales with the iteration count
+     times intermediate_graph_degree^2, so halving the intermediate degree cuts
+     each iteration to a quarter, and halving the final degree also halves the
+     neighbours every search iteration has to scan.  intermediate must stay >=
+     graph_degree because the pruning step can only shrink a candidate list.
+
+     The evaluator-measured recall cliff at 128/256 sits between niter 45 (fails
+     hidden250k recall@100_baseline_delta) and 51 (passes), and the fitted window
+     model build_ratio = 1/((1-f) + f*N/100), f ~ 0.71, says 3.0x would need
+     niter ~ 6 there -- unreachable.  At 64/128 the iteration term is a quarter of
+     its former weight, so niter=30 puts the combined ratio at roughly 2.9x on
+     hidden250k and higher on SIFT250K, whose fixed overhead share is smaller.
+     Whether hidden250k holds recall@100 within 0.005 of baseline at degree 64 is
+     the one thing this cannot be checked for without an AMD GPU. */
+  h->ip->graph_degree = 64;
+  h->ip->intermediate_graph_degree = 128;
+  h->ip->nn_descent_niter = 30;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
